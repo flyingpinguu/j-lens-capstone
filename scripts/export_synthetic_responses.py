@@ -17,7 +17,19 @@ MODEL_NAME = "Qwen/Qwen3.5-4B"
 ADAPTER_DIR = ROOT / "outputs" / "qwen35-4b-lora-pilot"
 EVAL_FILE = ROOT / "data" / "evaluation" / "pilot_eval.jsonl"
 OUTPUT_FILE = ROOT / "outputs" / "synthetic_test_responses.jsonl"
-DEVICE = torch.device("mps")
+LOCAL_FILES_ONLY = os.getenv("HF_LOCAL_FILES_ONLY", "0") == "1"
+
+if torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+    MODEL_DTYPE = torch.bfloat16
+elif torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    MODEL_DTYPE = (
+        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    )
+else:
+    DEVICE = torch.device("cpu")
+    MODEL_DTYPE = torch.float32
 
 
 def read_jsonl(path):
@@ -61,11 +73,14 @@ def generate_answer(model, tokenizer, row):
 
 
 rows = read_jsonl(EVAL_FILE)
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, local_files_only=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME,
+    local_files_only=LOCAL_FILES_ONLY,
+)
 base_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    dtype=torch.bfloat16,
-    local_files_only=True,
+    dtype=MODEL_DTYPE,
+    local_files_only=LOCAL_FILES_ONLY,
     low_cpu_mem_usage=True,
 ).to(DEVICE)
 

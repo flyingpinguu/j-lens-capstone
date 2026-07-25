@@ -1,0 +1,11 @@
+# Versions used for the recorded Qwen3.5-4B pilot run.
+torch==2.13.0
+transformers==5.14.1
+peft==0.19.1
+accelerate==1.14.0
+datasets==5.0.0
+nbformat==5.10.4
+jupyterlab>=4,<5
+
+# Anthropic's Jacobian Lens checkout is included as a Git submodule.
+-e ./external/anthropic/jacobian-lens
