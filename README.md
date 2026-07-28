@@ -19,7 +19,9 @@ j-lens-capstone/
 │       └── jacobian-lens/        # Separate upstream Anthropic repository
 ├── notebooks/
 │   ├── j-lens-run.ipynb          # Response generation and J-Lens readouts
-│   └── j-lens-analysis.ipynb     # Quantitative analysis and ML features
+│   ├── analysis_alex/
+│   │   └── j-lens-analysis.ipynb # Quantitative analysis and ML features
+│   └── analysis_friedrich/       # Friedrich's analysis notebooks
 ├── outputs/
 │   ├── qwen35-4b-lora-pilot/    # Trained pilot adapter
 │   ├── qwen35-4b-lora-smoke/    # Initial smoke-test adapter
