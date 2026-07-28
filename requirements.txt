@@ -7,5 +7,9 @@ datasets==5.0.0
 nbformat==5.10.4
 jupyterlab>=4,<5
 
+# Analysis notebooks (secret-token dataframe, plots).
+pandas==3.0.5
+matplotlib==3.11.1
+
 # Anthropic's Jacobian Lens checkout is included as a Git submodule.
 -e ./external/anthropic/jacobian-lens
