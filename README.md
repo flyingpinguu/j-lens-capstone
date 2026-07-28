@@ -18,8 +18,8 @@ j-lens-capstone/
 │   └── anthropic/
 │       └── jacobian-lens/        # Separate upstream Anthropic repository
 ├── notebooks/
-│   ├── jlens_walkthrough.ipynb   # Project copy of the fitted-lens walkthrough
-│   └── qwen35_lora_pilot.ipynb  # Executed LoRA pilot and evaluation
+│   ├── j-lens-run.ipynb          # Response generation and J-Lens readouts
+│   └── j-lens-analysis.ipynb     # Quantitative analysis and ML features
 ├── outputs/
 │   ├── qwen35-4b-lora-pilot/    # Trained pilot adapter
 │   ├── qwen35-4b-lora-smoke/    # Initial smoke-test adapter
@@ -28,7 +28,7 @@ j-lens-capstone/
     └── export_synthetic_responses.py
 ```
 
-The Anthropic Jacobian Lens checkout is included as a pinned Git submodule. Project-specific walkthrough changes live in `notebooks/jlens_walkthrough.ipynb`, keeping the upstream checkout separate.
+The Anthropic Jacobian Lens checkout is included as a pinned Git submodule.
 
 ## Setup
 

@@ -18,26 +18,21 @@ The experiments use synthetic conversations in which a system prompt contains a 
 
 ## Important files
 
-- `notebooks/j-lens-run.ipynb`: Main inference pipeline. It reads JSONL prompts, generates responses, applies an existing J-Lens, and writes one JSON object per example.
-- `notebooks/j-lens-analysis.ipynb`: Loads runner output into a pandas DataFrame and visualizes common readout tokens by position and layer.
-- `notebooks/qwen35_lora_pilot.ipynb`: LoRA training and behavioral pilot.
+- `notebooks/j-lens-run.ipynb`: Main inference pipeline. It samples attacks from the injection corpus, inserts a secret into a selected system prompt, generates responses, applies an existing J-Lens, and writes one JSON object per attack.
+- `notebooks/j-lens-analysis.ipynb`: Loads runner output and lets the user inspect the top-10 tokens for one prompt, token position, and layer.
 - `data/training/pilot_train.jsonl`: Pilot training conversations.
-- `data/evaluation/eval.jsonl`: Held-out evaluation data.
-- `data/evaluation/jlens_pilot_test_20.jsonl`: Small runner test containing 10 attack and 10 benign prompts.
+- `data/evaluation/injection_corpus.jsonl`: Injection templates and benign controls.
+- `data/evaluation/system_prompts.jsonl`: System-prompt templates containing the `{{SECRET}}` placeholder.
 - `outputs/j-lens-run/`: Generated responses and hierarchical J-Lens readouts.
 - `external/anthropic/jacobian-lens/`: Pinned upstream Anthropic repository. Keep project-specific changes outside this directory.
 
 ## Current runner conventions
 
-The runner expects each input JSONL row to contain:
-
-```json
-{
-  "id": "example-id",
-  "system_prompt": "...",
-  "user_prompt": "..."
-}
-```
+The runner reads `injection_corpus.jsonl` and `system_prompts.jsonl`. At the top
+of the notebook, `SECRET` selects the inserted secret and
+`ATTACKS_BY_STRICTNESS` controls how many attack prompts are sampled without
+replacement for each system-prompt strictness. `RANDOM_SEED` makes that
+selection reproducible.
 
 Readouts are stored as:
 
@@ -55,16 +50,33 @@ The optional single-token probe is configured near the top of the runner:
 
 ```python
 PROBE_ENABLED = True
-PROBE_TOKEN = " secret"
+PROBE_TOKEN = SECRET
 ```
 
 The probe string must tokenize to exactly one vocabulary token. Its full-vocabulary rank and logit are saved for every token position and layer.
 
+Each output record also contains `attack_successful`. It is `true` when the
+configured secret occurs in the generated response, using a case-insensitive
+substring check, and `false` otherwise. This is the target for later models
+trained on the J-Lens readouts.
+
+The analysis notebook creates three views of a run:
+
+- `prompts_df`: one row per attack with metadata, response, and target;
+- `readouts_df`: one row per attack, token position, and layer, with the top-k
+  token IDs, tokens, and logits kept as lists;
+- `classifier_df`: one row per attack using probe ranks and logits from every
+  layer at the final prompt position.
+
+Classifier features exclude response positions to avoid leaking the outcome
+into the predictors.
+
 ## Working guidance
 
-- Keep notebook code concise and easy for students to understand.
+- Keep notebook code concise and easy for students to understand. simplicity over unnecessary function
 - Prefer the fixed, known data schema over abstractions for hypothetical input formats.
 - The runner currently applies existing lenses; lens fitting is a separate workflow.
 - A modified or LoRA-fine-tuned model requires its own fitted lens.
 - Use the repository `.venv` and `requirements.txt` for the recorded environment.
 - Preserve unrelated work and generated results unless a task explicitly replaces them.
+- Don't solve tasks you are not asked to solve. If the user tells you about an idea or issue, maybe he just wants to talk about it first.

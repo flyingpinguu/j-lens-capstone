@@ -4,6 +4,10 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 
+# Local experiment notebooks.
+notebooks/jlens_walkthrough.ipynb
+notebooks/qwen35_lora_pilot.ipynb
+
 # Redundant tokenizer copies; the tokenizer is loaded from the base model.
 outputs/**/tokenizer.json
 outputs/**/tokenizer_config.json
