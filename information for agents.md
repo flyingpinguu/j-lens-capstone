@@ -19,7 +19,7 @@ The experiments use synthetic conversations in which a system prompt contains a 
 ## Important files
 
 - `notebooks/j-lens-run.ipynb`: Main inference pipeline. It samples attacks from the injection corpus, inserts a secret into a selected system prompt, generates responses, applies an existing J-Lens, and writes one JSON object per attack.
-- `notebooks/j-lens-analysis.ipynb`: Loads runner output and lets the user inspect the top-10 tokens for one prompt, token position, and layer.
+- `notebooks/analysis_alex/j-lens-analysis.ipynb`: Loads runner output and lets the user inspect the top-10 tokens for one prompt, token position, and layer.
 - `data/training/pilot_train.jsonl`: Pilot training conversations.
 - `data/evaluation/injection_corpus.jsonl`: Injection templates and benign controls.
 - `data/evaluation/system_prompts.jsonl`: System-prompt templates containing the `{{SECRET}}` placeholder.
@@ -28,11 +28,11 @@ The experiments use synthetic conversations in which a system prompt contains a 
 
 ## Current runner conventions
 
-The runner reads `injection_corpus.jsonl` and `system_prompts.jsonl`. At the top
-of the notebook, `SECRET` selects the inserted secret and
-`ATTACKS_BY_STRICTNESS` controls how many attack prompts are sampled without
-replacement for each system-prompt strictness. `RANDOM_SEED` makes that
-selection reproducible.
+The runner reads `injection_corpus.jsonl` and `system_prompts.jsonl`. At the
+top of the notebook, `SECRET` selects the inserted secret.
+`MAX_PROMPTS_PER_STRICTNESS = None` runs the full corpus in its original
+order. An integer selects a reproducible random sample without replacement
+using `RANDOM_SEED`; the same sample is paired with every system prompt.
 
 Readouts are stored as:
 
@@ -70,6 +70,12 @@ The analysis notebook creates three views of a run:
 
 Classifier features exclude response positions to avoid leaking the outcome
 into the predictors.
+
+`READOUT_POSITIONS = "user"` stores readouts only for tokens belonging to the
+user message. It excludes the system prompt, chat-template markers, and
+generated response. `"prompt"` remains available for all prompt tokens. The
+selected position mode is part of the output filename so resume mode cannot
+mix incompatible readout scopes.
 
 ## Working guidance
 

@@ -41,7 +41,7 @@ real source:
 
 The submodule under `external/` is upstream/read-only — do NOT edit anything
 in it. Our own pipeline code lives in `notebooks/j-lens-run.ipynb` (run
-harness) and `notebooks/j-lens-analysis.ipynb` /
+harness) and `notebooks/analysis_alex/j-lens-analysis.ipynb` /
 `notebooks/analysis_friedrich/` (analysis) — `notebooks/jlens_walkthrough.ipynb`,
 referenced here previously, does not exist in this repo.
 
@@ -138,7 +138,7 @@ Not yet populated at full-corpus scale: `READOUT_POSITIONS` (see "Run
 harness notes" below) controls how many sequence positions get a readout at
 all, and the full-corpus run used `"last"` (a single position per run, for
 run-time reasons) — enough for table 1, not for this table's per-position
-vocabulary analysis. A `"last_n"` or `"all"` run is needed to actually build
+vocabulary analysis. A `"user"`, `"prompt"`, or `"all"` run is needed to actually build
 table 2.
 
 ## Data files
@@ -155,17 +155,24 @@ above.
 
 ## Run harness notes (`notebooks/j-lens-run.ipynb`)
 
-- `READOUT_POSITIONS` (`"last"` / `"last_n"` / `"all"`) controls how many
+- `READOUT_POSITIONS` (`"last"` / `"last_n"` / `"user"` / `"prompt"` / `"all"`) controls how many
   sequence positions get a lens readout per run — the main lever on run
   time, since readout cost scales ~linearly with position count (each
-  position needs a full-vocab unembed per layer). Default is `"last"` (last
-  prompt position only — what table 1 needs). See Environment below for the
+  position needs a full-vocab unembed per layer). Default is `"user"` (only
+  user-message tokens, excluding the system prompt, chat-template markers,
+  and response). See Environment below for the
   timing this bought locally, and "Two dataframes" above for what it costs
   table 2.
+- `"user"` reads only the user-message content. `"prompt"` includes the system
+  prompt and chat-template markers but still excludes response positions.
 - The run cell resumes: it reads `OUTPUT_FILE`'s existing `id`s on start,
   skips them, and appends (not overwrites). A trailing line that fails to
   parse is treated as a partial write from an interrupted run and retried,
   not counted as done.
+- `MAX_PROMPTS_PER_STRICTNESS = None` runs the full corpus in file order.
+  Setting it to an integer samples that many corpus rows without replacement
+  using `RANDOM_SEED`; the same sample is paired with every system prompt.
+  The seed is included in capped-run filenames to keep resume files distinct.
 
 ## Environment
 
@@ -179,9 +186,9 @@ above.
   `READOUT_POSITIONS = "last"` in `j-lens-run.ipynb` (~20s/run). Use
   `torch.bfloat16`, not `float16`, for CPU runs — `float16` has poor/
   unsupported CPU kernel coverage in PyTorch. Colab/GPU is still the better
-  default for `READOUT_POSITIONS = "all"` runs (every position gets a
-  readout, not just the last prompt position — much more unembed compute)
-  or for the larger `qwen36-27b` config. Don't write code that silently
+  default for `READOUT_POSITIONS = "user"`, `"prompt"`, or `"all"` runs (many positions
+  need a full-vocab unembed at every layer), or for the larger
+  `qwen36-27b` config. Don't write code that silently
   assumes a local GPU is available — check/handle the CPU-only case
   explicitly or flag it.
 
