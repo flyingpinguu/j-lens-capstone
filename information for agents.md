@@ -28,11 +28,11 @@ The experiments use synthetic conversations in which a system prompt contains a 
 
 ## Current runner conventions
 
-The runner reads `injection_corpus.jsonl` and `system_prompts.jsonl`. At the top
-of the notebook, `SECRET` selects the inserted secret and
-`ATTACKS_BY_STRICTNESS` controls how many attack prompts are sampled without
-replacement for each system-prompt strictness. `RANDOM_SEED` makes that
-selection reproducible.
+The runner reads `injection_corpus.jsonl` and `system_prompts.jsonl`. At the
+top of the notebook, `SECRET` selects the inserted secret.
+`MAX_PROMPTS_PER_STRICTNESS = None` runs the full corpus in its original
+order. An integer selects a reproducible random sample without replacement
+using `RANDOM_SEED`; the same sample is paired with every system prompt.
 
 Readouts are stored as:
 

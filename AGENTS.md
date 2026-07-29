@@ -169,6 +169,10 @@ above.
   skips them, and appends (not overwrites). A trailing line that fails to
   parse is treated as a partial write from an interrupted run and retried,
   not counted as done.
+- `MAX_PROMPTS_PER_STRICTNESS = None` runs the full corpus in file order.
+  Setting it to an integer samples that many corpus rows without replacement
+  using `RANDOM_SEED`; the same sample is paired with every system prompt.
+  The seed is included in capped-run filenames to keep resume files distinct.
 
 ## Environment
 
