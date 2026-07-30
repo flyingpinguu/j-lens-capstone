@@ -7,9 +7,10 @@ datasets==5.0.0
 nbformat==5.10.4
 jupyterlab>=4,<5
 
-# Analysis notebooks (secret-token dataframe, plots).
+# Analysis notebooks (secret-token dataframe, plots, per-layer classifier).
 pandas==3.0.5
 matplotlib==3.11.1
+scikit-learn==1.9.0
 
 # Anthropic's Jacobian Lens checkout is included as a Git submodule.
 -e ./external/anthropic/jacobian-lens
