@@ -23,6 +23,13 @@ people, 4 weeks.
   instruction-mode vocabulary, leak-vs-resist token comparison.
 - **Second delivarable:** a second model (e.g. a LoRA-hardened variant)
   run through the *same* pipeline for a base-vs-hardened comparison.
+- **Third analysis track:** an accuracy-maximizing model — combine the
+  single-token secret-rank feature with other token positions/layers that
+  show high individual predictability, instead of optimizing purely for
+  per-layer localization. See "Combining features across positions" under
+  Methodology guardrails for the correlation/alignment risk to manage while
+  building this, and Deliverable order below for where it sits relative to
+  the localization work.
 - Pipeline work is in progress (first version). Treat existing
   pipeline code as the starting point to align with these guardrails, not to
   rebuild from scratch — but flag any conflicts with the rules below rather
@@ -63,8 +70,29 @@ Keep this reimplementation consistent with `apply()`'s actual behavior in
   train/test is leakage and inflates accuracy. Group by `category`, not
   `template_id`: in `data/evaluation/injection_corpus.jsonl`, `template_id`
   is unique per row (no repeated variants), so grouping on it doesn't group
-  anything. `category` (11 attack categories x 14 templates each, plus
-  `control`) is the real template family. This applies to the per-layer classifiers and to any Ridge/Lasso cross-check model.
+  anything. `category` (11 attack categories, plus `control`) is the real
+  template family. `injection_corpus.jsonl` was expanded mid-project (AI-generated
+  additions) from 220 to 660 rows — 396 `control` + 84 per attack category
+  (was 66 + 14); re-check these counts before hardcoding them anywhere, this
+  file may grow again. This applies to the per-layer classifiers and to any Ridge/Lasso cross-check model.
+- **Per-layer classifiers must state which reference position they use, and
+  results are not comparable across positions without saying so.** The
+  per-layer AUC curve looks meaningfully different depending on which single
+  sequence position the feature is read at — e.g. last user-message token vs.
+  last scaffolding token (see `READOUT_POSITIONS`/segments below) gave
+  opposite-side-of-chance AUC at some layers for `sys_strict`. "The per-layer
+  classifier" is underspecified without naming the position.
+- **Combining features across positions has the same correlation risk as
+  combining across layers, with an added alignment problem.** A joint/stacked
+  model over multiple sequence positions (not just multiple layers) is
+  tempting after seeing which (layer, position) cells look strongest in a
+  heatmap, but: (a) adjacent positions can be as correlated as adjacent
+  layers — same "secondary robustness check, not primary result" rule
+  applies; (b) unlike layers (the same computational stage for every prompt),
+  "N tokens from the end of the user message" is not the same *semantic*
+  position across different attack templates (a short direct command vs. a
+  long storytelling setup) — per-offset AUC curves are noisier than per-layer
+  ones for this reason, not just from sample size.
 - **Open decision: how `control`/`benign` rows factor into the `category`
   fold groups.** Not yet decided whether `control` is its own held-out group
   like the attack categories, or always included in every fold as a negative
@@ -145,13 +173,40 @@ table 2.
 
 Only `data/evaluation/injection_corpus.jsonl` and
 `data/evaluation/system_prompts.jsonl` are current inputs to the jlens
-pipeline. `data/evaluation/eval.jsonl`, `pilot_eval.jsonl`,
-`jlens_pilot_test_20.jsonl`, and `scripts/export_synthetic_responses.py`
-(with its `outputs/qwen35-4b-lora-*` artifacts) are a pre-single-token-secret
-legacy track — multi-token secrets like `TRAIN-AMBER-PINE-1137`, no `jlens`
-involvement, disconnected from the run harness. Do not wire them into the
-jlens pipeline; doing so would violate the single-token-secret guardrail
-above.
+pipeline. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
+`jlens_pilot_test_20.jsonl`, `pilot_train.jsonl`, `train.jsonl`) and
+`scripts/export_synthetic_responses.py` (with its `outputs/qwen35-4b-lora-*`
+artifacts) are a pre-single-token-secret legacy track — multi-token secrets
+like `TRAIN-AMBER-PINE-1137`, no `jlens` involvement, disconnected from the
+run harness. Do not wire them into the jlens pipeline; doing so would
+violate the single-token-secret guardrail above.
+
+Current run outputs, `outputs/j-lens-run/`:
+- `qwen35-4b-full-corpus.jsonl` — `READOUT_POSITIONS = "last"`, one position
+  per run (last prompt position, i.e. the last scaffolding token — see
+  below). Table 1 only.
+- `qwen35-4b-full-corpus-user-positions.jsonl` — `"user"` mode, every
+  user-message position, no scaffolding or response.
+- `qwen35-4b-full-corpus-user-response-positions-top10.jsonl` — the richest
+  run so far: every `user` and `response` position (`readout_scope:
+  "user_response"` — system prompt itself still not captured), each
+  position's `segment` explicitly labeled `"user"`, `"prompt_suffix"`
+  (the chat-template turn-boundary tokens between the user message and
+  generation — a fixed 9-token span, `<|im_end|>\n<|im_start|>assistant\n
+  <think>\n\n</think>\n\n`, identical across every run since it doesn't
+  depend on prompt content), or `"response"`. Built on the expanded
+  660-row corpus (1320 runs). Large (~1GB) — read it in a single streaming
+  pass, not into one big in-memory list; see
+  `notebooks/analysis_friedrich/secret_token_analysis.ipynb` for the
+  pattern. `response` positions should not be used as classifier features —
+  predicting the response's own outcome from the response is circular.
+- `qwen35-4b-pilot-test-20.jsonl` — legacy (multi-token secret, pre-dates the
+  single-token guardrail). Also has a standing repo-hygiene quirk: it's
+  `.gitattributes`-marked for Git LFS but was committed as a raw (non-LFS)
+  blob at some point in history, so `git status`/`git diff` will show it as
+  perpetually "modified" even when the working-tree bytes are unchanged —
+  don't trust that signal for this specific file, diff against
+  `origin/<branch>` content directly if it matters.
 
 ## Run harness notes (`notebooks/j-lens-run.ipynb`)
 
@@ -191,6 +246,17 @@ above.
   `qwen36-27b` config. Don't write code that silently
   assumes a local GPU is available — check/handle the CPU-only case
   explicitly or flag it.
+- This repo uses Git LFS for `outputs/**/adapter_model.safetensors` and
+  `outputs/j-lens-run/*.jsonl` (see `.gitattributes`). `git pull` /
+  `git reset --hard` can hang well past 2 minutes on the LFS smudge step
+  when a run adds/changes a large tracked output (seen with the ~1GB
+  `qwen35-4b-full-corpus-user-response-positions-top10.jsonl`) — the
+  ordinary git-level update (files, ref, index) actually finishes quickly,
+  it's fetching the real LFS blob content that's slow. If a pull seems
+  stuck, `GIT_LFS_SKIP_SMUDGE=1 git pull` (or `reset --hard`) finishes the
+  git-level state fast, leaving LFS files as pointer stubs; follow with
+  `git lfs pull` to fetch the real content, which is fine to run in the
+  background/with a long timeout.
 
 ## Deliverable order (graceful degradation — each stage independently
 presentable)
@@ -204,5 +270,15 @@ presentable)
 5. Robustness + honest limitations (lens-fit sensitivity, Ridge/Lasso
    cross-check, error analysis on which template families break the
    classifier).
-6. Stretch: second model (e.g. LoRA) through the same pipeline, confound
+6. Accuracy-maximizing model: combine the single-token secret-rank feature
+   with other high-predictability token positions/layers (across the
+   per-layer and per-position curves from steps 2-3) into one model. A
+   distinct goal from steps 2-3 — those optimize for localization
+   ("where/when is the signal"), this optimizes for raw predictive power.
+   Start from a small, hand-picked, plausibly-independent feature set
+   (see the correlation/alignment guardrail above) rather than full
+   clustering + stacking, given the current sample size (~220-440
+   rows/system prompt). Report as a separate number from the localization
+   curves, not a replacement for them.
+7. Stretch: second model (e.g. LoRA) through the same pipeline, confound
    stated explicitly.
