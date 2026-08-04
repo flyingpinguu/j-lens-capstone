@@ -117,23 +117,39 @@ def collect(input_file, analysis_cfg):
                         offset_row[f"scaffold_offset{offset}"] = readouts[str(position)]["layers"][str(layer)]["probe"]["rank"]
                     offset_rows[layer].append(offset_row)
 
-            # --- F1-F4 (short runs contribute a smaller window instead of
-            #     being dropped: the feature table must cover every run
-            #     Stage 3 will see)
+            # --- feature bank (short runs contribute a smaller window
+            #     instead of being dropped: the feature table must cover
+            #     every run Stage 3 will see).
+            #     The bank is the systematic band x position-aggregate grid
+            #     defined ONCE and then frozen -- model-side selection
+            #     happens inside the CV folds, not by editing this list.
+            #     The original F1-F4 keep their documented names: F1 =
+            #     late_ref_level, F2 = late_user_peak, F3 = scaffold_delta,
+            #     F4 = mid_user_peak.
             ref_layers = readouts[str(scaffold_positions[0])]["layers"]
             last_user_layers = readouts[str(user_positions[0])]["layers"]
             window_layers = [readouts[str(p)]["layers"] for p in user_positions[:user_window_n]]
-            late_ref = band_log_rank(ref_layers, late_band)
-            late_window = [band_log_rank(layers, late_band) for layers in window_layers]
-            mid_window = [band_log_rank(layers, mid_band) for layers in window_layers]
-            feature_rows.append({
-                **meta,
-                "n_user_positions": len(user_positions),
-                "late_ref_level": late_ref,
-                "late_user_peak": float(np.quantile(late_window, peak_quantile)),
-                "scaffold_delta": late_ref - band_log_rank(last_user_layers, late_band),
-                "mid_user_peak": float(np.quantile(mid_window, peak_quantile)),
-            })
+            feature_row = {**meta, "n_user_positions": len(user_positions)}
+            for band_name, band in [("late", late_band), ("mid", mid_band)]:
+                scaffold_last = band_log_rank(ref_layers, band)
+                user_last = band_log_rank(last_user_layers, band)
+                window = [band_log_rank(layers, band) for layers in window_layers]
+                scaffold_ref_vals = [band_log_rank(layers, band) for layers in scaffold_ref]
+                prefix_map = {
+                    f"{band_name}_scaffold_last": scaffold_last,
+                    f"{band_name}_scaffold_ref_mean": float(np.mean(scaffold_ref_vals)),
+                    f"{band_name}_user_last": user_last,
+                    f"{band_name}_user_peak": float(np.quantile(window, peak_quantile)),
+                    f"{band_name}_user_mean": float(np.mean(window)),
+                    f"{band_name}_scaffold_delta": scaffold_last - user_last,
+                }
+                feature_row.update(prefix_map)
+            # documented F1/F3 aliases (same values, original names; F2/F4
+            # already carry their documented names late_user_peak /
+            # mid_user_peak from the loop above)
+            feature_row["late_ref_level"] = feature_row.pop("late_scaffold_last")
+            feature_row["scaffold_delta"] = feature_row.pop("late_scaffold_delta")
+            feature_rows.append(feature_row)
             del row, readouts
 
     print(f"Runs processed: {len(curve_rows)} "

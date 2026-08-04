@@ -115,7 +115,12 @@ of full stacking without its nested-CV cost, which our sample size
   parameter-free average for the same reason: no trained meta-learner.
 - One shared fold definition for all four models — scores from different
   splits are not comparable.
-- `sys_lax` and `sys_strict` get separate models — never pooled.
+- `sys_lax` and `sys_strict`: **evaluation and reporting are always per
+  system prompt.** Training may pool the two only if `system_id` is an
+  explicit feature — the base rates differ hugely (dev leak rate ~49% vs
+  ~14%), so a pooled AUC partly measures *system detection* instead of
+  leak prediction and must never be reported as a headline number. The
+  localization curves (Stage 2) stay strictly separate either way.
 - Response positions are excluded as features (predicting the response's
   outcome from the response is circular).
 - Reported as its own number (accuracy-maximizing track), separate from the
