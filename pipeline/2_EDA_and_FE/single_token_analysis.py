@@ -1,0 +1,290 @@
+"""Stage 2.1 -- single-token (secret-rank) analysis.
+
+Ported from notebooks/analysis_friedrich/secret_token_analysis.ipynb. One
+streaming pass over the Stage-1 output JSONL (the file is ~1GB -- never
+loaded into memory at once), then:
+
+  1. Per-layer secret-token-rank classifier curve (GroupKFold by category),
+     read at the mean log-rank over the last 3 scaffolding tokens.
+  2. Per-layer ROC-AUC by position offset as a heatmap (user + scaffolding
+     segments, diverging around chance = 0.5).
+  3. The four 2.1.2 features (F1-F4) as a DataFrame -- returned to
+     pipeline_main for Stage 3 and written to CSV as the track's hand-off
+     artifact.
+
+Figures and the feature CSV go to <analysis_output_dir>/<active_model>/.
+Band/window parameters come from settings["analysis"] -- they are config,
+not code, so a second model can re-derive them from its own curves (see
+docs/pipeline_architecture.md).
+"""
+
+import json
+
+import matplotlib
+matplotlib.use("Agg")  # headless: this script saves figures, never shows them
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GroupKFold, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
+
+SYSTEM_COLORS = {"sys_lax": "#2a78d6", "sys_strict": "#eb6834"}
+SYSTEM_LABELS = {"sys_lax": "sys_lax (low strictness)", "sys_strict": "sys_strict (high strictness)"}
+DIVERGING_CMAP = LinearSegmentedColormap.from_list(
+    "auc_diverging", ["#0d366b", "#f0efec", "#8c1f1f"]
+)
+
+
+def positions_by_segment(readouts):
+    """User and scaffolding positions, each ordered by distance from its own
+    boundary: user[0] = last user token, scaffold[0] = last scaffolding
+    token. Response positions are never returned -- using them as features
+    would be circular (they describe the outcome instead of predicting it)."""
+    user = sorted((int(p) for p, d in readouts.items() if d["segment"] == "user"), reverse=True)
+    scaffold = sorted((int(p) for p, d in readouts.items() if d["segment"] == "prompt_suffix"), reverse=True)
+    return user, scaffold
+
+
+def band_log_rank(layers_data, band):
+    """Mean log secret-rank over a layer band at one position (adjacent
+    layers are highly correlated; the band mean is the same signal with
+    less noise)."""
+    return float(np.mean([np.log(layers_data[str(layer)]["probe"]["rank"]) for layer in band]))
+
+
+def collect(input_file, analysis_cfg):
+    """Single streaming pass -> everything the three outputs below need."""
+    user_window_n = analysis_cfg["user_window_n"]
+    peak_quantile = analysis_cfg["peak_quantile"]
+    late_band = analysis_cfg["late_band"]
+    mid_band = analysis_cfg["mid_band"]
+    scaffold_ref_n = analysis_cfg["scaffold_ref_n"]
+    heatmap_layers = analysis_cfg["heatmap_layers"]
+
+    n_layers = None
+    curve_rows = []          # graph 1: per-layer scaffold-ref mean log-rank
+    offset_rows = None       # graph 2: per heatmap layer, raw ranks per offset
+    feature_rows = []        # F1-F4
+    n_skipped_short = 0
+
+    with input_file.open(encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"  skipping unparseable line {line_no}")
+                continue
+
+            if n_layers is None:
+                n_layers = len(row["readout_layers"])
+                offset_rows = {layer: [] for layer in heatmap_layers}
+
+            readouts = row["readouts"]
+            user_positions, scaffold_positions = positions_by_segment(readouts)
+            meta = {
+                "id": row["id"],
+                "category": row["category"],
+                "system_id": row["system_id"],
+                "attack_successful": row["attack_successful"],
+            }
+
+            # --- graph 1: mean log-rank over the last scaffold_ref_n
+            #     scaffolding tokens, per layer
+            scaffold_ref = [readouts[str(p)]["layers"] for p in scaffold_positions[:scaffold_ref_n]]
+            curve_row = dict(meta)
+            for layer in range(n_layers):
+                curve_row[f"scaffold_ref_logrank_L{layer}"] = float(np.mean(
+                    [np.log(layers[str(layer)]["probe"]["rank"]) for layers in scaffold_ref]
+                ))
+            curve_rows.append(curve_row)
+
+            # --- graph 2: raw ranks per position offset (log happens in the
+            #     CV pipeline, as in the notebook); short runs are dropped so
+            #     every row has the full offset set
+            if len(user_positions) < user_window_n:
+                n_skipped_short += 1
+            else:
+                for layer in heatmap_layers:
+                    offset_row = dict(meta)
+                    for offset, position in enumerate(user_positions[:user_window_n]):
+                        offset_row[f"user_offset{offset}"] = readouts[str(position)]["layers"][str(layer)]["probe"]["rank"]
+                    for offset, position in enumerate(scaffold_positions):
+                        offset_row[f"scaffold_offset{offset}"] = readouts[str(position)]["layers"][str(layer)]["probe"]["rank"]
+                    offset_rows[layer].append(offset_row)
+
+            # --- F1-F4 (short runs contribute a smaller window instead of
+            #     being dropped: the feature table must cover every run
+            #     Stage 3 will see)
+            ref_layers = readouts[str(scaffold_positions[0])]["layers"]
+            last_user_layers = readouts[str(user_positions[0])]["layers"]
+            window_layers = [readouts[str(p)]["layers"] for p in user_positions[:user_window_n]]
+            late_ref = band_log_rank(ref_layers, late_band)
+            late_window = [band_log_rank(layers, late_band) for layers in window_layers]
+            mid_window = [band_log_rank(layers, mid_band) for layers in window_layers]
+            feature_rows.append({
+                **meta,
+                "n_user_positions": len(user_positions),
+                "late_ref_level": late_ref,
+                "late_user_peak": float(np.quantile(late_window, peak_quantile)),
+                "scaffold_delta": late_ref - band_log_rank(last_user_layers, late_band),
+                "mid_user_peak": float(np.quantile(mid_window, peak_quantile)),
+            })
+            del row, readouts
+
+    print(f"Runs processed: {len(curve_rows)} "
+          f"(heatmap skips {n_skipped_short} runs with < {user_window_n} user positions)")
+    return {
+        "n_layers": n_layers,
+        "curve_df": pd.DataFrame(curve_rows),
+        "offset_dfs": {layer: pd.DataFrame(rows) for layer, rows in offset_rows.items()},
+        "features_df": pd.DataFrame(feature_rows),
+    }
+
+
+def cv_auc(X, y, groups, pipeline_):
+    scores = cross_val_score(
+        pipeline_, X, y, cv=GroupKFold(5), groups=groups, scoring="roc_auc"
+    )
+    return scores.mean(), scores.std()
+
+
+def plot_per_layer_curve(curve_df, n_layers, scaffold_ref_n, out_path):
+    """Graph 1 -- the notebook's per-layer classifier curve, read at the
+    mean over the last scaffold_ref_n scaffolding tokens. Features are
+    already log-scale, so the pipeline scales but does not log again."""
+    pipeline_ = Pipeline([
+        ("scaling", StandardScaler()),
+        ("model", LogisticRegression(max_iter=1000)),
+    ])
+    layers = list(range(n_layers))
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for system_id, subset in curve_df.groupby("system_id"):
+        means, stds = [], []
+        for layer in layers:
+            mean, std = cv_auc(
+                subset[[f"scaffold_ref_logrank_L{layer}"]],
+                subset["attack_successful"], subset["category"], pipeline_,
+            )
+            means.append(mean)
+            stds.append(std)
+        means, stds = np.array(means), np.array(stds)
+        color = SYSTEM_COLORS.get(system_id, "#52514e")
+        ax.plot(layers, means, color=color, linewidth=2, marker="o", markersize=4,
+                label=SYSTEM_LABELS.get(system_id, system_id))
+        ax.fill_between(layers, means - stds, means + stds, color=color, alpha=0.15, linewidth=0)
+
+    ax.axhline(0.5, color="#898781", linestyle="--", linewidth=1.2, zorder=1)
+    ax.text(0.3, 0.51, "chance (AUC 0.5)", color="#898781", fontsize=9, va="bottom")
+    ax.set_xlabel("layer")
+    ax.set_ylabel("cross-validated ROC-AUC")
+    ax.set_xticks(range(0, n_layers, 2))
+    ax.set_title(
+        "Per-layer secret-token-rank classifier (GroupKFold by category)\n"
+        f"reference: mean log-rank over last {scaffold_ref_n} scaffolding tokens"
+    )
+    ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print("Saved:", out_path)
+
+
+def plot_offset_heatmap(offset_dfs, analysis_cfg, out_path):
+    """Graph 2 -- the notebook's layer x position-offset AUC heatmap, rows
+    in chronological order (user 7..0, then scaffold 8..0; user-0 and
+    scaffold-8 are the two adjacent tokens, so they sit on either side of
+    the divider). Diverging color scale around chance, shared across both
+    system-prompt panels."""
+    heatmap_layers = analysis_cfg["heatmap_layers"]
+    user_offsets = list(range(analysis_cfg["user_window_n"]))
+    any_df = next(iter(offset_dfs.values()))
+    scaffold_offsets = sorted(
+        int(c.removeprefix("scaffold_offset"))
+        for c in any_df.columns if c.startswith("scaffold_offset")
+    )
+    # Raw ranks -> log inside the CV pipeline, as in the notebook.
+    pipeline_ = Pipeline([
+        ("log_transform", FunctionTransformer(np.log)),
+        ("scaling", StandardScaler()),
+        ("model", LogisticRegression(max_iter=1000)),
+    ])
+
+    system_ids = sorted(any_df["system_id"].unique())
+    row_specs = (
+        [("user", o) for o in reversed(user_offsets)]
+        + [("scaffold", o) for o in reversed(scaffold_offsets)]
+    )
+    row_labels = [f"{segment} {offset}" for segment, offset in row_specs]
+
+    matrices = {}
+    for system_id in system_ids:
+        matrix = np.zeros((len(row_specs), len(heatmap_layers)))
+        for row_idx, (segment, offset) in enumerate(row_specs):
+            for col_idx, layer in enumerate(heatmap_layers):
+                subset = offset_dfs[layer]
+                subset = subset[subset["system_id"] == system_id]
+                mean, _ = cv_auc(
+                    subset[[f"{segment}_offset{offset}"]],
+                    subset["attack_successful"], subset["category"], pipeline_,
+                )
+                matrix[row_idx, col_idx] = mean
+        matrices[system_id] = matrix
+
+    all_values = np.concatenate([m.ravel() for m in matrices.values()])
+    vmax_dev = max(abs(all_values.min() - 0.5), abs(all_values.max() - 0.5))
+    norm = TwoSlopeNorm(vmin=0.5 - vmax_dev, vcenter=0.5, vmax=0.5 + vmax_dev)
+
+    fig, axes = plt.subplots(1, len(system_ids), figsize=(13, 8), sharey=True)
+    im = None
+    for ax, system_id in zip(np.atleast_1d(axes), system_ids):
+        im = ax.imshow(matrices[system_id], aspect="auto", cmap=DIVERGING_CMAP, norm=norm)
+        ax.set_xticks(range(len(heatmap_layers)))
+        ax.set_xticklabels(heatmap_layers, rotation=90)
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels, fontsize=8)
+        ax.axhline(len(user_offsets) - 0.5, color="white", linewidth=2)
+        ax.set_xlabel("layer")
+        ax.set_title(system_id)
+
+    np.atleast_1d(axes)[0].set_ylabel("position offset (top-to-bottom = chronological order)")
+    cbar = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
+    cbar.set_label("cross-validated ROC-AUC")
+    fig.suptitle("Per-layer ROC-AUC by position offset (diverging around chance = 0.5)")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("Saved:", out_path)
+
+
+def run(settings, input_file):
+    """Run the single-token analysis; returns the F1-F4 features DataFrame
+    (one row per run: id, category, system_id, attack_successful,
+    n_user_positions, late_ref_level, late_user_peak, scaffold_delta,
+    mid_user_peak)."""
+    analysis_cfg = settings["analysis"]
+    out_dir = settings["analysis_output_dir"] / settings["active_model"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print("Reading:", input_file)
+
+    data = collect(input_file, analysis_cfg)
+
+    plot_per_layer_curve(
+        data["curve_df"], data["n_layers"], analysis_cfg["scaffold_ref_n"],
+        out_dir / "per_layer_auc_scaffold_ref.png",
+    )
+    plot_offset_heatmap(
+        data["offset_dfs"], analysis_cfg,
+        out_dir / "offset_layer_auc_heatmap.png",
+    )
+
+    features_csv = out_dir / "single_token_features.csv"
+    data["features_df"].to_csv(features_csv, index=False)
+    print("Saved:", features_csv)
+    return data["features_df"]
