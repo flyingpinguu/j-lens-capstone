@@ -14,6 +14,12 @@ Two levels:
   2. GroupKFold by category on the dev set -- the shared CV used for all
      development-time numbers (per-layer curves, hyperparameter search,
      M1-M4 comparison).
+
+Team convention on the two system prompts: evaluation and reporting are
+ALWAYS per system prompt. Pooled training is allowed only with system_id
+as an explicit feature -- the base rates differ hugely (dev leak rate
+~49% lax vs ~14% strict), so a pooled AUC partly measures system
+detection instead of leak prediction. Never report a pooled overall AUC.
 """
 
 from sklearn.model_selection import GroupKFold
