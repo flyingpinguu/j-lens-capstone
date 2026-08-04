@@ -185,7 +185,7 @@ def plot_per_layer_curve(curve_df, n_layers, scaffold_ref_n, out_path):
     ax.set_ylabel("cross-validated ROC-AUC")
     ax.set_xticks(range(0, n_layers, 2))
     ax.set_title(
-        "Per-layer secret-token-rank classifier (GroupKFold by category)\n"
+        "Per-layer secret-token-rank classifier (GroupKFold by category, dev categories only)\n"
         f"reference: mean log-rank over last {scaffold_ref_n} scaffolding tokens"
     )
     ax.grid(axis="y", color="#e1e0d9", linewidth=0.8)
@@ -257,7 +257,7 @@ def plot_offset_heatmap(offset_dfs, analysis_cfg, out_path):
     np.atleast_1d(axes)[0].set_ylabel("position offset (top-to-bottom = chronological order)")
     cbar = fig.colorbar(im, ax=axes, fraction=0.03, pad=0.02)
     cbar.set_label("cross-validated ROC-AUC")
-    fig.suptitle("Per-layer ROC-AUC by position offset (diverging around chance = 0.5)")
+    fig.suptitle("Per-layer ROC-AUC by position offset (diverging around chance = 0.5, dev categories only)")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("Saved:", out_path)
@@ -267,24 +267,44 @@ def run(settings, input_file):
     """Run the single-token analysis; returns the F1-F4 features DataFrame
     (one row per run: id, category, system_id, attack_successful,
     n_user_positions, late_ref_level, late_user_peak, scaffold_delta,
-    mid_user_peak)."""
+    mid_user_peak, split).
+
+    Figures and their CV run on dev categories only -- the holdout
+    categories are the final test set, and letting them into the curves
+    would leak test information into band/window choices. The feature
+    table covers ALL runs (holdout rows are needed for the final gated
+    evaluation) and marks each row via the "split" column.
+    """
     analysis_cfg = settings["analysis"]
+    holdout = set(settings["validation"]["holdout_categories"])
     out_dir = settings["analysis_output_dir"] / settings["active_model"]
     out_dir.mkdir(parents=True, exist_ok=True)
     print("Reading:", input_file)
 
     data = collect(input_file, analysis_cfg)
 
+    curve_dev = data["curve_df"][~data["curve_df"]["category"].isin(holdout)]
+    offset_dev = {
+        layer: df[~df["category"].isin(holdout)]
+        for layer, df in data["offset_dfs"].items()
+    }
+    print(f"Figures use dev categories only: {len(curve_dev)} of "
+          f"{len(data['curve_df'])} runs (holdout: {', '.join(sorted(holdout))})")
+
     plot_per_layer_curve(
-        data["curve_df"], data["n_layers"], analysis_cfg["scaffold_ref_n"],
+        curve_dev, data["n_layers"], analysis_cfg["scaffold_ref_n"],
         out_dir / "per_layer_auc_scaffold_ref.png",
     )
     plot_offset_heatmap(
-        data["offset_dfs"], analysis_cfg,
+        offset_dev, analysis_cfg,
         out_dir / "offset_layer_auc_heatmap.png",
     )
 
+    features_df = data["features_df"]
+    features_df["split"] = np.where(
+        features_df["category"].isin(holdout), "holdout", "dev"
+    )
     features_csv = out_dir / "single_token_features.csv"
-    data["features_df"].to_csv(features_csv, index=False)
+    features_df.to_csv(features_csv, index=False)
     print("Saved:", features_csv)
-    return data["features_df"]
+    return features_df
