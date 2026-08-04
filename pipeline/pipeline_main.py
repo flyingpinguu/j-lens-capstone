@@ -74,6 +74,22 @@ SETTINGS = {
     # --- generation
     "max_new_tokens": 64,
 
+    # --- train/test split (see pipeline/validation.py -- the single source
+    #     of truth for splits/folds across all tracks and models).
+    #     holdout_categories = final out-of-fold test set, chosen from
+    #     Karin's category analysis; never used for training, tuning, or
+    #     feature selection. evaluate_holdout stays False until the final
+    #     evaluation at project end.
+    "validation": {
+        "holdout_categories": [
+            "authority_impersonation",
+            "encoding_obfuscation",
+            "storytelling",
+        ],
+        "n_splits": 5,
+        "evaluate_holdout": False,
+    },
+
     # --- output (same location and naming scheme as the notebook runs,
     #     so resume files stay compatible)
     "output_dir": ROOT / "outputs" / "j-lens-run",
@@ -137,16 +153,29 @@ def main():
             run_data_file = stage1_output
 
     # --- Stage 2.1: single-token analysis -- two figures + the F1-F4
-    #     feature table (also written to CSV as the hand-off artifact)
+    #     feature table (also written to CSV as the hand-off artifact).
+    #     Figures/CV inside are dev-only; the feature table covers all runs
+    #     and carries a "split" column.
     single_token_analysis = load_stage("2_EDA_and_FE/single_token_analysis.py")
     single_token_features = single_token_analysis.run(SETTINGS, run_data_file)
     print("Stage 2.1 complete:", single_token_features.shape[0], "runs,",
           single_token_features.shape[1], "columns")
 
+    # --- shared split: dev for all development-time work, holdout only for
+    #     the final gated evaluation
+    validation = load_stage("validation.py")
+    dev_features, holdout_features = validation.split_holdout(
+        single_token_features, SETTINGS["validation"]
+    )
+    print(f"Split: {len(dev_features)} dev runs, {len(holdout_features)} holdout runs "
+          f"(categories: {', '.join(SETTINGS['validation']['holdout_categories'])})")
+
     # --- Stage 2.2: top-k readout analysis (2_EDA_and_FE/) -- Alex's track,
-    #     plugs in here.
-    # --- Stage 3: model comparison (3_model_predictions/) -- depends on
-    #     both Stage-2 tracks; see docs/pipeline_architecture.md.
+    #     plugs in here (same rule: dev-only for development-time numbers).
+    # --- Stage 3: model comparison (3_model_predictions/) -- gets
+    #     dev_features only; folds via validation.group_cv(SETTINGS["validation"]).
+    #     The holdout evaluation runs once at project end, gated behind
+    #     SETTINGS["validation"]["evaluate_holdout"].
 
 
 if __name__ == "__main__":
