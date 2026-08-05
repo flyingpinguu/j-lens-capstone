@@ -92,6 +92,40 @@ SETTINGS = {
         "evaluate_holdout": False,
     },
 
+    # --- Stage 3 / M1: single-token-feature models (two variants on
+    #     identical folds: logreg + xgboost; nested CV: outer = shared
+    #     GroupKFold, inner grid search tunes per training fold).
+    #     "features" is the frozen Stage-2.1 feature bank -- selection
+    #     happens inside the folds, not by editing this list.
+    "m1": {
+        "features": [
+            # late band (L27-31)
+            "late_ref_level",        # F1: last scaffolding token
+            "late_scaffold_ref_mean",
+            "late_user_last",
+            "late_user_peak",        # F2
+            "late_user_mean",
+            "scaffold_delta",        # F3
+            # mid band (L16-26)
+            "mid_scaffold_last",
+            "mid_scaffold_ref_mean",
+            "mid_user_last",
+            "mid_user_peak",         # F4
+            "mid_user_mean",
+            "mid_scaffold_delta",
+        ],
+        "C_grid": [0.01, 0.1, 1.0, 10.0],
+        "inner_splits": 3,
+        "class_weight": "balanced",
+        "xgb": {
+            "n_estimators": 200,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "max_depth_grid": [2, 3],
+            "learning_rate_grid": [0.05, 0.1],
+        },
+    },
+
     # --- output (same location and naming scheme as the notebook runs,
     #     so resume files stay compatible)
     "output_dir": ROOT / "outputs" / "j-lens-run",
