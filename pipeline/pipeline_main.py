@@ -14,6 +14,7 @@ from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 ROOT = PIPELINE_DIR.parent
+CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "analysis_alex" / "pipeline_classifier"
 
 # --------------------------------------------------------------- inputs
 INJECTION_FILE = ROOT / "data" / "evaluation" / "injection_corpus.jsonl"
@@ -87,6 +88,7 @@ SETTINGS = {
             "storytelling",
         ],
         "n_splits": 5,
+        "inner_splits": 4,
         "evaluate_holdout": False,
     },
 
@@ -151,6 +153,74 @@ SETTINGS = {
         "scaffold_ref_n": 3,                # graph 1 reference: mean over last N scaffolding tokens
         "heatmap_layers": list(range(17, 32)),
     },
+
+    # --- M1: secret-rank-only baselines. Both variants use the same shared
+    #     outer category folds as M2; tuning, when enabled, stays inside
+    #     each outer training fold.
+    "run_m1": True,
+    "m1": {
+        "features": [
+            "late_ref_level",
+            "late_user_peak",
+            "scaffold_delta",
+            "mid_user_peak",
+        ],
+        "variants": ["m1_logreg", "m1_xgb"],
+        "threshold": 0.5,
+        "optimize_hyperparameters": True,
+        "C": 0.1,
+        "C_grid": [0.01, 0.1, 1.0, 10.0],
+        "xgb": {
+            "n_estimators": 200,
+            "max_depth": 2,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "max_depth_grid": [2, 3],
+            "learning_rate_grid": [0.05, 0.1],
+            "n_jobs": 1,
+        },
+        "output_dir": CLASSIFIER_OUTPUT_DIR,
+    },
+
+    # --- Stage 2.2 + M2/M4 multitoken classifier.
+    #     mode: "topk_only", "topk_plus_rank", or "both".
+    #     The four rank features are appended after SVD; they never enter
+    #     the SVD itself. Hyperparameter search is nested inside category
+    #     folds and can be enabled independently of feature extraction.
+    "run_multitoken": True,
+    "multitoken": {
+        "mode": "both",
+        # Pool lax + strict to train one detector across both scenarios.
+        # system_id stays metadata and is never a classifier feature.
+        "pool_system_prompts": True,
+        "n_prompt_positions": 16,
+        "layers": list(range(16, 32)),
+        "top_k": 10,
+        "vocabulary_size": 100,
+        "min_token_frequency": 10,
+        "svd_components": 16,
+        "rank_features": [
+            "late_ref_level",
+            "late_user_peak",
+            "scaffold_delta",
+            "mid_user_peak",
+        ],
+        "optimize_hyperparameters": False,
+        "C": 0.1,
+        "C_grid": [0.03, 0.1, 0.3],
+        "output_dir": CLASSIFIER_OUTPUT_DIR,
+    },
+
+    # --- M3: no meta-learner. Average the configured M1 rank-only and M2
+    #     Top-k-only probabilities on their identical OOF rows.
+    "run_m3": True,
+    "m3": {
+        "m1_variant": "m1_logreg",
+        "m2_feature_mode": "topk_only",
+        "threshold": 0.5,
+        "output_dir": CLASSIFIER_OUTPUT_DIR,
+    },
 }
 
 
@@ -195,8 +265,8 @@ def main():
     print("Stage 2.1 complete:", single_token_features.shape[0], "runs,",
           single_token_features.shape[1], "columns")
 
-    # --- shared split: dev for all development-time work, holdout only for
-    #     the final gated evaluation
+    # --- shared split helper. The concrete Stage-3 fold plan is built
+    #     below from the common M1/M2 run universe after Top-k extraction.
     validation = load_stage("validation.py")
     dev_features, holdout_features = validation.split_holdout(
         single_token_features, SETTINGS["validation"]
@@ -204,19 +274,57 @@ def main():
     print(f"Split: {len(dev_features)} dev runs, {len(holdout_features)} holdout runs "
           f"(categories: {', '.join(SETTINGS['validation']['holdout_categories'])})")
 
-    # --- Stage 2.2: top-k readout analysis (2_EDA_and_FE/) -- Alex's track,
-    #     plugs in here (same rule: dev-only for development-time numbers).
+    # --- Stage 2.2 + Stage 3. Raw Top-k arrays are extracted once. The
+    #     shared fold plan is then fixed before either M1 or M2 runs, so a
+    #     category has exactly the same outer fold in both models.
+    if SETTINGS["run_multitoken"]:
+        topk_features = load_stage("2_EDA_and_FE/top-k_token_analysis.py")
+        topk_dataset = topk_features.run(SETTINGS, run_data_file)
+        fold_plan = validation.make_fold_plan(
+            topk_dataset["metadata"], SETTINGS["validation"]
+        )
+        print("Shared Stage-3 folds:")
+        print(
+            fold_plan[fold_plan["split"].eq("dev")]
+            .groupby("fold")["category"]
+            .unique()
+            .to_string()
+        )
 
-    # --- Stage 3 / M1: single-token model on the dev split
-    m1 = load_stage("3_model_predictions/M1_single_token_model.py")
-    m1_metrics = m1.run(SETTINGS, dev_features, validation)
-    print("Stage 3 / M1 complete:")
-    print(m1_metrics.to_string(index=False))
+        m1_predictions = None
+        if SETTINGS["run_m1"]:
+            m1 = load_stage("3_model_predictions/M1_single_token_model.py")
+            m1_metrics, m1_predictions, m1_models = m1.run(
+                SETTINGS, single_token_features, fold_plan, validation
+            )
+            print(f"M1 complete: {len(m1_metrics)} variants, "
+                  f"{len(m1_predictions)} prediction rows")
 
-    # --- Stage 3 / M2-M4: M2 consumes Alex's 2.2 features on the same
-    #     folds; M3 = soft-voting average of the M1/M2 OOF probabilities;
-    #     M4 = combined features. The holdout evaluation runs once at
-    #     project end, gated behind SETTINGS["validation"]["evaluate_holdout"].
+        multitoken_model = load_stage("3_model_predictions/M2_top_k_token_model.py")
+        m2_metrics, m2_predictions, m2_models = multitoken_model.run(
+            SETTINGS,
+            topk_dataset,
+            single_token_features,
+            fold_plan,
+            topk_features,
+            validation,
+        )
+        print(f"M2 complete: {len(m2_metrics)} metric rows, "
+              f"{len(m2_predictions)} prediction rows, {len(m2_models)} final models")
+
+        # M3 runs last and consumes only predictions from the two base
+        # models; it never sees their original features.
+        if SETTINGS["run_m3"]:
+            if m1_predictions is None:
+                raise ValueError("run_m3=True requires run_m1=True")
+            m3 = load_stage("3_model_predictions/M3_soft_voting_model.py")
+            m3_metrics, m3_predictions = m3.run(
+                SETTINGS, fold_plan, m1_predictions, m2_predictions
+            )
+            print("M3 complete:")
+            print(m3_metrics.to_string(index=False))
+
+    # The final holdout remains untouched unless evaluate_holdout=True.
 
 
 if __name__ == "__main__":

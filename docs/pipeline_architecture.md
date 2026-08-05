@@ -43,7 +43,7 @@ flowchart TD
     subgraph S21["2.1 Single-token analysis"]
         direction TB
         A1["2.1.1 Analysis findings:<br/>layer × prompt-position analysis<br/>→ saved figures per research question"]:::ana
-        F1["2.1.2 Most-predictive<br/>single-token features<br/>(todo)"]:::iface2
+        F1["2.1.2 Four compact<br/>single-token rank features"]:::iface2
         A1 --> F1
     end
 
@@ -94,10 +94,19 @@ both.
 
 **Stage 3 — why four models:** all four are trained and evaluated on the
 *same* fixed fold definition (3.1), so their scores are directly comparable.
+The pipeline builds one explicit `run_id → split → fold` plan from the common
+M1/M2 row universe after Top-k extraction. M1 and M2 consume this table
+instead of each calling `GroupKFold` independently; this also handles the
+short runs that Stage 2.2 cannot represent.
 M1/M2 establish what each track's signal is worth alone. M3 (average of
 M1's and M2's predicted probabilities — no trained meta-learner) tests
 whether the two signals are complementary or redundant: if M3 ≈ M1, the
 top-k signal adds little beyond secret rank — itself a reportable finding.
+The current implementation combines `m1_logreg` with `m2_topk_only`; both
+choices are explicit in `SETTINGS["m3"]`. It computes a separate soft-vote
+probability and ROC-AUC for every prompt position. M3 verifies matching ids,
+categories, targets, and fold numbers before averaging, then writes one
+metrics table and one row-level prediction table.
 M4 is the accuracy-maximizing headline number. This is the ensemble insight
 of full stacking without its nested-CV cost, which our sample size
 (~220–440 rows per system prompt, ~12 fold groups) doesn't support.
@@ -115,12 +124,11 @@ of full stacking without its nested-CV cost, which our sample size
   parameter-free average for the same reason: no trained meta-learner.
 - One shared fold definition for all four models — scores from different
   splits are not comparable.
-- `sys_lax` and `sys_strict`: **evaluation and reporting are always per
-  system prompt.** Training may pool the two only if `system_id` is an
-  explicit feature — the base rates differ hugely (dev leak rate ~49% vs
-  ~14%), so a pooled AUC partly measures *system detection* instead of
-  leak prediction and must never be reported as a headline number. The
-  localization curves (Stage 2) stay strictly separate either way.
+- The multitoken leakage detector currently pools `sys_lax` and
+  `sys_strict`, with `system_id` retained only as metadata and never used as
+  a feature. This targets robustness across the two observed system-prompt
+  regimes; it does not by itself demonstrate generalization to an unseen
+  system prompt.
 - Response positions are excluded as features (predicting the response's
   outcome from the response is circular).
 - Reported as its own number (accuracy-maximizing track), separate from the
@@ -164,8 +172,9 @@ Physically, Stage 1 writes **one JSONL per run config** (see
 `system_id`, `template_id`, `category`), the generated response, the leak
 label (`attack_successful`), and hierarchical readouts (token position →
 layer → top-k tokens + secret-token probe rank/logit). Both system prompts
-live in the same file — split downstream by filtering, never pooled into one
-classifier.
+live in the same file. The current Stage-3 configuration pools them into one
+classifier while retaining `system_id` as metadata, never as a feature;
+system-specific descriptive analyses can still filter the same table.
 
 Downstream, the Stage-2 tracks read that JSONL into two derived views,
 joined by run id. They stay separate because their shapes differ: the

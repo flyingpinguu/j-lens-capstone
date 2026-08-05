@@ -1,196 +1,215 @@
-"""Stage 3 -- M1: leakage models on the single-token feature bank.
+"""Stage 3 / M1 -- classifiers using only the four secret-rank features.
 
-Two variants on identical folds, both reported (the linear-vs-nonlinear
-comparison is itself a result):
-  - m1_logreg: standardized logistic regression, C tuned per fold
-  - m1_xgb:    XGBoost, small grid tuned per fold
-
-Per-system-prompt models on the dev split (see the convention in
-pipeline/validation.py: evaluation is always per system prompt). Nested CV:
-the outer loop is the shared GroupKFold from validation.py; inside each
-outer training fold a GridSearchCV (also grouped by category) picks the
-hyperparameters -- no hyperparameter ever sees its own test fold
-(Stage 3.2 in docs/pipeline_architecture.md).
-
-Feature-bank note: the bank (12 band x position aggregates, built in Stage
-2.1) is fixed; which features matter is decided by regularization /
-tree splits inside each training fold -- honest selection, not manual
-picking on dev scores.
-
-Outputs to <analysis_output_dir>/<active_model>/:
-  - M1_metrics.csv          -- per variant x system: ROC-AUC / accuracy /
-                               balanced accuracy (mean +/- std over folds)
-  - M1_oof_predictions.csv  -- out-of-fold leak probabilities per run, one
-                               column per variant (m1_logreg_proba,
-                               m1_xgb_proba). This is M1's hand-off to the
-                               M3 soft-voting ensemble; M2 must produce the
-                               same shape on the same folds. Probabilities
-                               are uncalibrated (logreg is reasonably
-                               calibrated by construction, XGBoost less so
-                               -- with only ~73 strict positives a
-                               calibration fit would be noisier than the
-                               bias it removes, revisit if M3 suffers).
+M1 is evaluated on the shared run-to-fold plan created in validation.py.
+Neither category nor system_id is a feature.  The returned row-level
+probabilities are the input to the parameter-free M3 soft-voting ensemble.
 """
 
-import matplotlib
-matplotlib.use("Agg")  # headless: figures are saved, never shown
-import matplotlib.pyplot as plt
+from datetime import datetime, timezone
+
+import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
-from sklearn.model_selection import GridSearchCV, GroupKFold
-from sklearn.pipeline import Pipeline
+from sklearn.model_selection import ParameterGrid
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 
-def build_variants(cfg, y_train_pos_ratio):
-    """Estimator + parameter grid per variant. Built per system because
-    scale_pos_weight depends on the class balance."""
-    logreg = Pipeline([
-        ("scaling", StandardScaler()),
-        ("model", LogisticRegression(max_iter=1000, class_weight=cfg["class_weight"])),
-    ])
-    logreg_grid = {"model__C": cfg["C_grid"]}
-
-    # Trees need no scaling; scale_pos_weight covers the imbalance.
+def _build_variants(cfg, negative_positive_ratio):
+    """Create the two M1 estimators and their optional search grids."""
+    logreg = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            C=cfg["C"],
+            class_weight="balanced",
+            max_iter=3000,
+            solver="liblinear",
+            random_state=cfg["random_state"],
+        ),
+    )
+    xgb_cfg = cfg["xgb"]
     xgb = XGBClassifier(
-        n_estimators=cfg["xgb"]["n_estimators"],
-        subsample=cfg["xgb"]["subsample"],
-        colsample_bytree=cfg["xgb"]["colsample_bytree"],
+        n_estimators=xgb_cfg["n_estimators"],
+        max_depth=xgb_cfg["max_depth"],
+        learning_rate=xgb_cfg["learning_rate"],
+        subsample=xgb_cfg["subsample"],
+        colsample_bytree=xgb_cfg["colsample_bytree"],
+        scale_pos_weight=negative_positive_ratio,
         eval_metric="logloss",
-        random_state=0,
+        random_state=cfg["random_state"],
+        n_jobs=xgb_cfg.get("n_jobs", 1),
     )
-    xgb_grid = {
-        "max_depth": cfg["xgb"]["max_depth_grid"],
-        "learning_rate": cfg["xgb"]["learning_rate_grid"],
-        "scale_pos_weight": [1.0, y_train_pos_ratio],
+    return {
+        "m1_logreg": (logreg, {"logisticregression__C": cfg["C_grid"]}),
+        "m1_xgb": (
+            xgb,
+            {
+                "max_depth": xgb_cfg["max_depth_grid"],
+                "learning_rate": xgb_cfg["learning_rate_grid"],
+            },
+        ),
     }
-    return {"m1_logreg": (logreg, logreg_grid), "m1_xgb": (xgb, xgb_grid)}
 
 
-def save_metrics_table(metrics_df, out_path):
-    """Readable results table as PNG next to the other figures -- the CSV
-    keeps the full detail (incl. per-fold hyperparameters), this is the
-    at-a-glance view. Best AUC per system is bolded."""
-    display = metrics_df.copy()
-    display["ROC-AUC (mean ± std)"] = display.apply(
-        lambda r: f"{r['auc_mean']:.3f} ± {r['auc_std']:.3f}", axis=1
-    )
-    display = display[[
-        "model", "system_id", "n_runs", "n_leaks",
-        "ROC-AUC (mean ± std)", "accuracy_mean", "balanced_accuracy_mean",
-    ]].rename(columns={
-        "system_id": "system", "n_runs": "runs", "n_leaks": "leaks",
-        "accuracy_mean": "accuracy", "balanced_accuracy_mean": "bal. accuracy",
-    })
+def _fit(estimator, grid, X, y, groups, cfg, validation_module):
+    """Fit one estimator, with category-grouped tuning when enabled."""
+    if not cfg["optimize_hyperparameters"]:
+        fitted = clone(estimator).fit(X, y)
+        return fitted, {}
 
-    best_rows = set(metrics_df.groupby("system_id")["auc_mean"].idxmax())
+    scores = []
+    for parameters in ParameterGrid(grid):
+        fold_scores = []
+        inner = validation_module.inner_group_cv(cfg["validation"])
+        for train, test in inner.split(X, y, groups):
+            candidate = clone(estimator).set_params(**parameters)
+            candidate.fit(X[train], y[train])
+            fold_scores.append(
+                _safe_auc(y[test], candidate.predict_proba(X[test])[:, 1])
+            )
+        valid_scores = [score for score in fold_scores if not np.isnan(score)]
+        mean_score = float(np.mean(valid_scores)) if valid_scores else -np.inf
+        scores.append((mean_score, parameters))
 
-    fig, ax = plt.subplots(figsize=(10, 0.6 + 0.45 * len(display)))
-    ax.axis("off")
-    table = ax.table(
-        cellText=display.values, colLabels=display.columns,
-        loc="center", cellLoc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.5)
-    table.auto_set_column_width(col=list(range(len(display.columns))))
-    for (row, col), cell in table.get_celld().items():
-        cell.set_edgecolor("#d5d4cf")
-        if row == 0:
-            cell.set_text_props(weight="bold")
-            cell.set_facecolor("#eeede8")
-        elif row - 1 in best_rows:
-            cell.set_text_props(weight="bold")
-    ax.set_title(
-        "M1 -- single-token feature bank (dev split, shared GroupKFold by category)",
-        fontsize=11, pad=16,
-    )
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print("Saved:", out_path)
+    _, best_parameters = max(scores, key=lambda item: item[0])
+    fitted = clone(estimator).set_params(**best_parameters).fit(X, y)
+    return fitted, best_parameters
 
 
-def run(settings, dev_features, validation):
-    """Train/evaluate both M1 variants on the dev split; returns the
-    metrics DataFrame."""
-    cfg = settings["m1"]
-    out_dir = settings["analysis_output_dir"] / settings["active_model"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    feature_cols = cfg["features"]
+def _safe_auc(y, probability):
+    return float(roc_auc_score(y, probability)) if len(np.unique(y)) == 2 else np.nan
 
-    metric_rows = []
-    oof_frames = []
-    for system_id, subset in dev_features.groupby("system_id"):
-        subset = subset.reset_index(drop=True)
-        X = subset[feature_cols]
-        y = subset["attack_successful"].to_numpy()
-        groups = subset["category"].to_numpy()
-        pos_ratio = float((y == 0).sum() / max(1, (y == 1).sum()))
-        variants = build_variants(cfg, pos_ratio)
 
-        oof = subset[["id", "system_id", "category", "attack_successful"]].copy()
-        oof["fold"] = -1
-        for variant_name, (estimator, grid) in variants.items():
-            outer = validation.group_cv(settings["validation"])
-            proba_oof = np.full(len(subset), np.nan)
-            fold_metrics = []
-            best_params = []
-            for fold, (train_idx, test_idx) in enumerate(outer.split(X, y, groups)):
-                search = GridSearchCV(
-                    estimator, grid,
-                    cv=GroupKFold(n_splits=cfg["inner_splits"]),
-                    scoring="roc_auc",
-                )
-                search.fit(X.iloc[train_idx], y[train_idx], groups=groups[train_idx])
-                best_params.append(search.best_params_)
+def run(settings, rank_features, fold_plan, validation_module):
+    """Fit M1 variants and return metrics, aligned predictions, and models."""
+    cfg = {
+        **settings["m1"],
+        "validation": settings["validation"],
+        "random_state": settings["random_seed"],
+    }
+    aligned = validation_module.align_fold_plan(rank_features, fold_plan, "id")
+    feature_columns = cfg["features"]
+    missing = set(feature_columns) - set(aligned.columns)
+    if missing:
+        raise ValueError(f"M1 feature columns are missing: {sorted(missing)}")
 
-                proba = search.predict_proba(X.iloc[test_idx])[:, 1]
-                proba_oof[test_idx] = proba
-                oof.loc[test_idx, "fold"] = fold
+    predictions = aligned[[
+        "run_id", "category", "system_id", "attack_successful", "split", "fold"
+    ]].copy()
+    dev_mask = aligned["split"].eq("dev").to_numpy()
+    holdout_mask = aligned["split"].eq("holdout").to_numpy()
+    dev_indices = np.flatnonzero(dev_mask)
+    holdout_indices = np.flatnonzero(holdout_mask)
 
-                y_test = y[test_idx]
-                if len(np.unique(y_test)) < 2:
-                    print(f"  {system_id} {variant_name} fold {fold}: single-class test fold, no AUC")
-                    fold_auc = np.nan
-                else:
-                    fold_auc = roc_auc_score(y_test, proba)
-                pred = proba >= 0.5
-                fold_metrics.append({
-                    "auc": fold_auc,
-                    "accuracy": accuracy_score(y_test, pred),
-                    "balanced_accuracy": balanced_accuracy_score(y_test, pred),
-                })
+    X_all = aligned[feature_columns].to_numpy(dtype=np.float32)
+    y_all = aligned["attack_successful"].to_numpy(dtype=np.int8)
+    groups_all = aligned["category"].to_numpy()
+    X_dev, y_dev = X_all[dev_indices], y_all[dev_indices]
+    groups_dev = groups_all[dev_indices]
+    folds_dev = aligned.loc[dev_mask, "fold"].to_numpy()
 
-            oof[f"{variant_name}_proba"] = proba_oof
-            fold_df = pd.DataFrame(fold_metrics)
-            metric_rows.append({
-                "model": variant_name,
-                "system_id": system_id,
-                "n_runs": len(subset),
-                "n_leaks": int(y.sum()),
-                "auc_mean": round(fold_df["auc"].mean(), 3),
-                "auc_std": round(fold_df["auc"].std(ddof=0), 3),
-                "accuracy_mean": round(fold_df["accuracy"].mean(), 3),
-                "balanced_accuracy_mean": round(fold_df["balanced_accuracy"].mean(), 3),
-                "best_params_per_fold": "; ".join(
-                    ", ".join(f"{k.removeprefix('model__')}={v}" for k, v in params.items())
-                    for params in best_params
-                ),
+    available_variants = {"m1_logreg", "m1_xgb"}
+    requested_variants = cfg.get("variants", sorted(available_variants))
+    unknown = set(requested_variants) - available_variants
+    if unknown:
+        raise ValueError(f"Unknown M1 variants: {sorted(unknown)}")
+
+    metrics_rows, final_models = [], {}
+    for variant_name in requested_variants:
+        oof_probability = np.full(len(dev_indices), np.nan)
+        fold_rows, fold_params = [], []
+
+        for fold, train, test in validation_module.outer_fold_indices(folds_dev):
+            train_ratio = float(
+                (y_dev[train] == 0).sum() / max(1, (y_dev[train] == 1).sum())
+            )
+            estimator, grid = _build_variants(cfg, train_ratio)[variant_name]
+            fitted, best_params = _fit(
+                estimator, grid, X_dev[train], y_dev[train], groups_dev[train],
+                cfg, validation_module,
+            )
+            probability = fitted.predict_proba(X_dev[test])[:, 1]
+            oof_probability[test] = probability
+            prediction = probability >= cfg["threshold"]
+            fold_balanced_accuracy = (
+                balanced_accuracy_score(y_dev[test], prediction)
+                if len(np.unique(y_dev[test])) == 2 else np.nan
+            )
+            fold_rows.append({
+                "fold": fold,
+                "auc": _safe_auc(y_dev[test], probability),
+                "accuracy": accuracy_score(y_dev[test], prediction),
+                "balanced_accuracy": fold_balanced_accuracy,
             })
-        oof_frames.append(oof)
+            fold_params.append(best_params)
 
-    metrics_df = pd.DataFrame(metric_rows)
-    oof_df = pd.concat(oof_frames, ignore_index=True)
+        probability_column = f"{variant_name}_probability"
+        prediction_column = f"{variant_name}_predicted_leaked"
+        predictions[probability_column] = np.nan
+        predictions[prediction_column] = pd.Series(
+            pd.array([pd.NA] * len(predictions), dtype="boolean")
+        )
+        predictions.loc[dev_indices, probability_column] = oof_probability
+        predictions.loc[dev_indices, prediction_column] = (
+            oof_probability >= cfg["threshold"]
+        )
 
-    metrics_csv = out_dir / "M1_metrics.csv"
-    oof_csv = out_dir / "M1_oof_predictions.csv"
-    metrics_df.to_csv(metrics_csv, index=False)
-    oof_df.to_csv(oof_csv, index=False)
-    print("Saved:", metrics_csv)
-    print("Saved:", oof_csv)
-    save_metrics_table(metrics_df, out_dir / "M1_metrics.png")
-    return metrics_df
+        dev_ratio = float((y_dev == 0).sum() / max(1, (y_dev == 1).sum()))
+        estimator, grid = _build_variants(cfg, dev_ratio)[variant_name]
+        final_model, final_params = _fit(
+            estimator, grid, X_dev, y_dev, groups_dev, cfg, validation_module
+        )
+        holdout_auc = np.nan
+        holdout_accuracy = np.nan
+        if settings["validation"]["evaluate_holdout"]:
+            holdout_probability = final_model.predict_proba(X_all[holdout_indices])[:, 1]
+            holdout_prediction = holdout_probability >= cfg["threshold"]
+            predictions.loc[holdout_indices, probability_column] = holdout_probability
+            predictions.loc[holdout_indices, prediction_column] = holdout_prediction
+            holdout_auc = _safe_auc(y_all[holdout_indices], holdout_probability)
+            holdout_accuracy = accuracy_score(y_all[holdout_indices], holdout_prediction)
+
+        fold_df = pd.DataFrame(fold_rows)
+        oof_prediction = oof_probability >= cfg["threshold"]
+        metrics_rows.append({
+            "model": variant_name,
+            "features": "secret_rank_only",
+            "n_dev": len(dev_indices),
+            "n_leaks": int(y_dev.sum()),
+            "n_auc_folds": int(fold_df["auc"].notna().sum()),
+            "mean_fold_auc": float(fold_df["auc"].mean()),
+            "fold_auc_std": float(fold_df["auc"].std(ddof=0)),
+            "oof_auc": _safe_auc(y_dev, oof_probability),
+            "oof_accuracy": float(accuracy_score(y_dev, oof_prediction)),
+            "oof_balanced_accuracy": float(
+                balanced_accuracy_score(y_dev, oof_prediction)
+            ),
+            "fold_parameters": fold_params,
+            "final_parameters": final_params,
+            "holdout_auc": holdout_auc,
+            "holdout_accuracy": holdout_accuracy,
+        })
+        final_models[variant_name] = {
+            "feature_columns": tuple(feature_columns),
+            "classifier": final_model,
+            "parameters": final_params,
+            "model_id": settings["model"]["model_id"],
+            "lens_file": settings["model"]["lens_file"],
+        }
+        print(f"M1 / {variant_name}: mean fold AUC={fold_df['auc'].mean():.3f}")
+
+    metrics = pd.DataFrame(metrics_rows)
+    output_dir = cfg["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics.to_csv(output_dir / "M1_metrics.csv", index=False)
+    predictions.to_csv(output_dir / "M1_predictions.csv", index=False)
+    joblib.dump({
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "config": {key: value for key, value in cfg.items() if key != "output_dir"},
+        "models": final_models,
+    }, output_dir / "M1_models.joblib")
+    return metrics, predictions, final_models

@@ -17,5 +17,9 @@ outputs/analysis_alex/
 outputs/**/tokenizer.json
 outputs/**/tokenizer_config.json
 
+# Large local optimizer snapshots used for exact LoRA training resumption.
+outputs/**/optimizer_state.pt
+outputs/**/checkpoint-epoch-*/
+
 # Local files inside the upstream checkout are managed by its own Git repository.
 external/anthropic/jacobian-lens/.DS_Store
