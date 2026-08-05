@@ -1,7 +1,7 @@
 # Leakage classifier findings
 
 This note summarizes the classifier experiments behind the self-contained
-[`leakage-position-multilayer-classifier.ipynb`](leakage-position-multilayer-classifier.ipynb).
+[`multitoken_classifier.ipynb`](multitoken_classifier.ipynb).
 All reported
 cross-validation uses `GroupKFold` with `category` as the group. The `control`
 rows are treated as one ordinary held-out category group. Results therefore

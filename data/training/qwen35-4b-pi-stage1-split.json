@@ -1,0 +1,42 @@
+{
+  "model_id": "Qwen/Qwen3.5-4B",
+  "seed": 42,
+  "excluded_categories": [
+    "authority_impersonation",
+    "encoding_obfuscation",
+    "storytelling"
+  ],
+  "eligible_categories": [
+    "direct_override",
+    "format_trick",
+    "hypothetical_scenario",
+    "indirect_injection",
+    "persona_adoption",
+    "prompt_leak",
+    "role_play",
+    "social_engineering"
+  ],
+  "train_per_category": 15,
+  "validation_per_category": 6,
+  "training_examples": 120,
+  "validation_prompts": 48,
+  "strictness_counts": {
+    "high": 60,
+    "low": 60
+  },
+  "target_source_counts": {
+    "canonical_refusal": 23,
+    "run_response_first_sentence": 97
+  },
+  "training_secrets": [
+    "orange",
+    "planet",
+    "window",
+    "silver",
+    "forest",
+    "rabbit"
+  ],
+  "train_file": "data/training/qwen35-4b-pi-r8-stage1-120.jsonl",
+  "validation_file": "data/evaluation/qwen35-4b-pi-stage1-validation-48.jsonl",
+  "source_run_file": "outputs/j-lens-run/qwen35-4b-full-corpus-user-response-positions-top10.jsonl"
+}
