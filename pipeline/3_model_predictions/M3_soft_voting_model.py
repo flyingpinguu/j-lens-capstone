@@ -1,9 +1,10 @@
-"""Stage 3 / M3 -- parameter-free M1 + M2 soft voting per position.
+"""Stage 3 / M3 -- parameter-free soft voting per position and across positions.
 
 For every prompt position, M3 averages the position-independent M1
 secret-rank probability and M2's Top-k/SVD probability at that position.
-There is no trainable meta-model. IDs, categories, folds, and targets must
-match before any probabilities are combined.
+It then averages all per-position M3 probabilities into one stacked soft
+vote. There is no trainable meta-model. IDs, categories, folds, and targets
+must match before any probabilities are combined.
 """
 
 import numpy as np
@@ -102,6 +103,7 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
     folds_dev = predictions.loc[dev, "fold"].to_numpy(dtype=np.int16)
 
     metric_rows = []
+    position_probability_columns = []
     for position, m2_column in zip(positions, m2_probability_columns):
         m2_probability = m2[m2_column].to_numpy(dtype=float)
         m3_probability = (predictions["m1_probability"] + m2_probability) / 2.0
@@ -110,6 +112,7 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
 
         probability_column = f"m3__{position}__probability"
         prediction_column = f"m3__{position}__predicted_leaked"
+        position_probability_columns.append(probability_column)
         predictions[f"m2__{position}__probability"] = m2_probability
         predictions[probability_column] = m3_probability
         predictions[prediction_column] = pd.Series(
@@ -140,8 +143,45 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
             )
         metric_rows.append(row)
 
+    # Second-level soft vote: every token-position M3 classifier contributes
+    # equally. This remains an OOF combination and has no fitted parameters.
+    stacked_probability = predictions[position_probability_columns].mean(
+        axis=1, skipna=False
+    ).to_numpy(dtype=float)
+    if np.isnan(stacked_probability[dev]).any():
+        raise ValueError("M3 position predictions are missing for the stacked vote")
+    predictions["m3_stacked_probability"] = stacked_probability
+    predictions["m3_stacked_predicted_leaked"] = pd.Series(
+        pd.array([pd.NA] * len(predictions), dtype="boolean")
+    )
+    available = ~np.isnan(stacked_probability)
+    predictions.loc[available, "m3_stacked_predicted_leaked"] = (
+        stacked_probability[available] >= cfg["threshold"]
+    )
+
+    stacked_row = {
+        "model": "m3_stacked_soft_vote",
+        "position": "all_positions",
+        **_metrics(y_dev, stacked_probability[dev], folds_dev, cfg["threshold"]),
+        "selected": False,
+        "holdout_auc": np.nan,
+        "holdout_accuracy": np.nan,
+    }
+    if settings["validation"]["evaluate_holdout"]:
+        if np.isnan(stacked_probability[holdout]).any():
+            raise ValueError("M3 stacked vote is missing holdout probabilities")
+        y_holdout = predictions.loc[holdout, "actual_leaked"].to_numpy(dtype=np.int8)
+        stacked_row["holdout_auc"] = _safe_auc(
+            y_holdout, stacked_probability[holdout]
+        )
+        stacked_row["holdout_accuracy"] = accuracy_score(
+            y_holdout, stacked_probability[holdout] >= cfg["threshold"]
+        )
+    metric_rows.append(stacked_row)
+
     metrics = pd.DataFrame(metric_rows)
-    selected_index = metrics["mean_fold_auc"].idxmax()
+    position_rows = metrics["model"].eq("m3_soft_vote")
+    selected_index = metrics.loc[position_rows, "mean_fold_auc"].idxmax()
     metrics.loc[selected_index, "selected"] = True
     selected_position = metrics.loc[selected_index, "position"]
     predictions["m3_selected_position"] = selected_position
@@ -158,6 +198,7 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
     predictions.to_csv(output_dir / "M3_soft_voting_predictions.csv", index=False)
     print(
         f"M3 / soft vote: best={selected_position}, "
-        f"mean fold AUC={metrics.loc[selected_index, 'mean_fold_auc']:.3f}"
+        f"mean fold AUC={metrics.loc[selected_index, 'mean_fold_auc']:.3f}; "
+        f"stacked={stacked_row['mean_fold_auc']:.3f}"
     )
     return metrics, predictions

@@ -10,8 +10,9 @@ notebooks/qwen35_lora_pilot.ipynb
 notebooks/analysis_alex/leakage-response-position-classifier.ipynb
 notebooks/analysis_alex/leakage-prompt-response-stacking.ipynb
 
-# Reproducible local classifier outputs and fitted artifacts.
+# Reproducible local analysis and pipeline outputs.
 outputs/analysis_alex/
+outputs/pipeline/
 
 # Redundant tokenizer copies; the tokenizer is loaded from the base model.
 outputs/**/tokenizer.json

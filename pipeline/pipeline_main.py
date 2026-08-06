@@ -14,7 +14,7 @@ from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 ROOT = PIPELINE_DIR.parent
-CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "analysis_alex" / "pipeline_classifier"
+CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "pipeline"
 
 # --------------------------------------------------------------- inputs
 INJECTION_FILE = ROOT / "data" / "evaluation" / "injection_corpus.jsonl"
