@@ -107,6 +107,16 @@
   .diagram-card .cap{font-size:14px;color:var(--muted);line-height:1.55;padding:14px 6px 0;
     font-family:var(--mono);max-width:900px;margin:0 auto}
   .diagram-card .cap b{color:var(--ink-soft)}
+  .tokenization-primer{max-width:900px;margin:0 auto 38px;text-align:center}
+  .tokenization-primer h3{font-size:clamp(24px,3.4vw,32px);font-weight:720;letter-spacing:-.015em;
+    margin-bottom:20px}
+  .tokenization-primer img{display:block;width:586px;max-width:100%;height:auto;margin:0 auto;
+    border:1px solid var(--line);border-radius:12px;background:#fff}
+  .llm-primer{max-width:1200px;margin:0 auto 34px}
+  .llm-primer h3{font-size:clamp(24px,3.4vw,32px);font-weight:720;letter-spacing:-.015em;
+    text-align:center;margin-bottom:20px}
+  .llm-primer img{display:block;width:100%;height:auto;border:1px solid var(--line);
+    border-radius:14px;background:#fff}
   .diagwrap{width:100%;overflow-x:auto;max-width:1200px;margin:0 auto}
 
   /* ---- pipeline flow ---- */
@@ -293,6 +303,16 @@
       </ol>
 
       <div class="diagram-card">
+        <div class="tokenization-primer">
+          <h3>Tokenization</h3>
+          <img src="assets/tokenization-example.png"
+            alt="The sentence Can I take you to the prompt split into colored token chunks.">
+        </div>
+        <div class="llm-primer">
+          <h3>How does an LLM work?</h3>
+          <img src="assets/llm-transformer-blocks.png"
+            alt="A prompt is split into tokens, processed through successive transformer layers, and converted into the next output token.">
+        </div>
         <div class="diagwrap">
           <svg class="jlens-diagram" width="100%" viewBox="0 0 680 660" xmlns="http://www.w3.org/2000/svg" role="img">
             <title>How J-Lens works</title>
