@@ -92,40 +92,6 @@ SETTINGS = {
         "evaluate_holdout": False,
     },
 
-    # --- Stage 3 / M1: single-token-feature models (two variants on
-    #     identical folds: logreg + xgboost; nested CV: outer = shared
-    #     GroupKFold, inner grid search tunes per training fold).
-    #     "features" is the frozen Stage-2.1 feature bank -- selection
-    #     happens inside the folds, not by editing this list.
-    "m1": {
-        "features": [
-            # late band (L27-31)
-            "late_ref_level",        # F1: last scaffolding token
-            "late_scaffold_ref_mean",
-            "late_user_last",
-            "late_user_peak",        # F2
-            "late_user_mean",
-            "scaffold_delta",        # F3
-            # mid band (L16-26)
-            "mid_scaffold_last",
-            "mid_scaffold_ref_mean",
-            "mid_user_last",
-            "mid_user_peak",         # F4
-            "mid_user_mean",
-            "mid_scaffold_delta",
-        ],
-        "C_grid": [0.01, 0.1, 1.0, 10.0],
-        "inner_splits": 3,
-        "class_weight": "balanced",
-        "xgb": {
-            "n_estimators": 200,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "max_depth_grid": [2, 3],
-            "learning_rate_grid": [0.05, 0.1],
-        },
-    },
-
     # --- output (same location and naming scheme as the notebook runs,
     #     so resume files stay compatible)
     "output_dir": ROOT / "outputs" / "j-lens-run",
@@ -159,11 +125,23 @@ SETTINGS = {
     #     each outer training fold.
     "run_m1": True,
     "m1": {
+        # Frozen Stage-2.1 feature bank (2 bands x 6 position aggregates).
+        # Measured on the dev split: the bank lifted sys_lax logreg AUC from
+        # 0.549 (4 features) to 0.648 -- selection happens inside the CV
+        # folds via regularization, not by editing this list.
         "features": [
-            "late_ref_level",
-            "late_user_peak",
-            "scaffold_delta",
-            "mid_user_peak",
+            "late_ref_level",        # F1: last scaffolding token, late band
+            "late_scaffold_ref_mean",
+            "late_user_last",
+            "late_user_peak",        # F2
+            "late_user_mean",
+            "scaffold_delta",        # F3
+            "mid_scaffold_last",
+            "mid_scaffold_ref_mean",
+            "mid_user_last",
+            "mid_user_peak",         # F4
+            "mid_user_mean",
+            "mid_scaffold_delta",
         ],
         "variants": ["m1_logreg", "m1_xgb"],
         "threshold": 0.5,
@@ -241,6 +219,18 @@ def read_jsonl(path):
         return [json.loads(line) for line in file if line.strip()]
 
 
+def _per_system_summary(label, per_system_df):
+    """Compact console view of a per-system metrics table."""
+    columns = [
+        "model", "system_id", "n_dev", "n_leaks",
+        "mean_fold_auc", "fold_auc_std", "oof_auc", "oof_balanced_accuracy",
+    ]
+    return (
+        f"{label} per-system metrics:\n"
+        + per_system_df[columns].round(3).to_string(index=False)
+    )
+
+
 def main():
     injections = read_jsonl(INJECTION_FILE)
     system_prompts = read_jsonl(SYSTEM_PROMPTS_FILE)
@@ -291,6 +281,8 @@ def main():
             .to_string()
         )
 
+        per_system_tables = []
+
         m1_predictions = None
         if SETTINGS["run_m1"]:
             m1 = load_stage("3_model_predictions/M1_single_token_model.py")
@@ -299,6 +291,17 @@ def main():
             )
             print(f"M1 complete: {len(m1_metrics)} variants, "
                   f"{len(m1_predictions)} prediction rows")
+            m1_per_system = validation.per_system_metrics(
+                m1_predictions,
+                [f"{variant}_probability" for variant in SETTINGS["m1"]["variants"]],
+                target_col="attack_successful",
+                threshold=SETTINGS["m1"]["threshold"],
+            )
+            m1_per_system.to_csv(
+                CLASSIFIER_OUTPUT_DIR / "M1_per_system_metrics.csv", index=False
+            )
+            print(_per_system_summary("M1", m1_per_system))
+            per_system_tables.append(m1_per_system)
 
         multitoken_model = load_stage("3_model_predictions/M2_top_k_token_model.py")
         m2_metrics, m2_predictions, m2_models = multitoken_model.run(
@@ -311,6 +314,21 @@ def main():
         )
         print(f"M2 complete: {len(m2_metrics)} metric rows, "
               f"{len(m2_predictions)} prediction rows, {len(m2_models)} final models")
+        # Per-system breakdown of the canonical (selected-position) columns;
+        # topk_only is M2 in the architecture, topk_plus_rank is M4.
+        mode_labels = {"topk_only": "M2", "topk_plus_rank": "M4"}
+        for mode in multitoken_model.FEATURE_MODES[SETTINGS["multitoken"]["mode"]]:
+            label = mode_labels[mode]
+            mode_per_system = validation.per_system_metrics(
+                m2_predictions,
+                [f"m2_{mode}_probability"],
+                target_col="actual_leaked",
+            )
+            mode_per_system.to_csv(
+                CLASSIFIER_OUTPUT_DIR / f"{label}_per_system_metrics.csv", index=False
+            )
+            print(_per_system_summary(f"{label} ({mode})", mode_per_system))
+            per_system_tables.append(mode_per_system)
 
         # M3 runs last and consumes only predictions from the two base
         # models; it never sees their original features.
@@ -323,6 +341,27 @@ def main():
             )
             print("M3 complete:")
             print(m3_metrics.to_string(index=False))
+            m3_per_system = validation.per_system_metrics(
+                m3_predictions,
+                ["m3_probability"],
+                target_col="actual_leaked",
+                threshold=SETTINGS["m3"]["threshold"],
+            )
+            m3_per_system.to_csv(
+                CLASSIFIER_OUTPUT_DIR / "M3_per_system_metrics.csv", index=False
+            )
+            print(_per_system_summary("M3", m3_per_system))
+            per_system_tables.append(m3_per_system)
+
+        # --- combined at-a-glance comparison table (all models, pooled +
+        #     per system), saved next to the Stage-2.1 figures.
+        if per_system_tables:
+            model_comparison_table = load_stage("3_model_predictions/model_comparison_table.py")
+            comparison_dir = SETTINGS["analysis_output_dir"] / SETTINGS["active_model"]
+            comparison_dir.mkdir(parents=True, exist_ok=True)
+            model_comparison_table.save(
+                per_system_tables, comparison_dir / "model_comparison_per_system.png"
+            )
 
     # The final holdout remains untouched unless evaluate_holdout=True.
 

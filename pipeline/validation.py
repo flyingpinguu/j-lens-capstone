@@ -23,6 +23,8 @@ detection instead of leak prediction. Never report a pooled overall AUC.
 """
 
 import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import GroupKFold
 
 
@@ -106,6 +108,55 @@ def align_fold_plan(df, fold_plan, id_col):
         else:
             aligned[column] = fold_plan[column].to_numpy()
     return aligned
+
+
+def _safe_auc(y, probability):
+    return float(roc_auc_score(y, probability)) if len(np.unique(y)) == 2 else float("nan")
+
+
+def per_system_metrics(predictions, probability_columns, target_col, threshold=0.5):
+    """Break dev OOF metrics down per system prompt (plus the pooled view).
+
+    Implements the convention above: pooled training may be convenient, but
+    reported numbers must exist per system prompt -- the two base rates
+    differ so much that a pooled AUC partly measures system detection.
+    Computed from the same OOF probabilities the pooled metrics use, so it
+    requires no retraining. Returns one row per (probability column,
+    cohort), cohorts being "pooled" plus each system_id.
+    """
+    rows = []
+    dev = predictions.loc[predictions["split"].eq("dev")]
+    for column in probability_columns:
+        scored = dev.loc[dev[column].notna()]
+        cohorts = [("pooled", scored)] + [
+            (system_id, scored.loc[scored["system_id"].eq(system_id)])
+            for system_id in sorted(scored["system_id"].unique())
+        ]
+        for cohort, frame in cohorts:
+            y = frame[target_col].to_numpy(dtype=np.int8)
+            probability = frame[column].to_numpy(dtype=float)
+            prediction = probability >= threshold
+            fold_aucs = [
+                _safe_auc(
+                    y[frame["fold"].eq(fold).to_numpy()],
+                    probability[frame["fold"].eq(fold).to_numpy()],
+                )
+                for fold in sorted(frame["fold"].unique())
+            ]
+            valid_fold_aucs = [auc for auc in fold_aucs if not np.isnan(auc)]
+            rows.append({
+                "model": column.removesuffix("_probability"),
+                "system_id": cohort,
+                "n_dev": len(frame),
+                "n_leaks": int(y.sum()),
+                "n_auc_folds": len(valid_fold_aucs),
+                "mean_fold_auc": float(np.mean(valid_fold_aucs)) if valid_fold_aucs else float("nan"),
+                "fold_auc_std": float(np.std(valid_fold_aucs)) if valid_fold_aucs else float("nan"),
+                "oof_auc": _safe_auc(y, probability),
+                "oof_accuracy": float(accuracy_score(y, prediction)),
+                "oof_balanced_accuracy": float(balanced_accuracy_score(y, prediction)),
+            })
+    return pd.DataFrame(rows)
 
 
 def outer_fold_indices(fold_values):

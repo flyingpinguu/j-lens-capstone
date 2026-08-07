@@ -1,4 +1,5 @@
-"""Stage 3 / M1 -- classifiers using only the four secret-rank features.
+"""Stage 3 / M1 -- classifiers using only the single-token (secret-rank)
+feature bank from Stage 2.1.
 
 M1 is evaluated on the shared run-to-fold plan created in validation.py.
 Neither category nor system_id is a feature.  The returned row-level
@@ -177,7 +178,7 @@ def run(settings, rank_features, fold_plan, validation_module):
         oof_prediction = oof_probability >= cfg["threshold"]
         metrics_rows.append({
             "model": variant_name,
-            "features": "secret_rank_only",
+            "features": "single_token_bank",
             "n_dev": len(dev_indices),
             "n_leaks": int(y_dev.sum()),
             "n_auc_folds": int(fold_df["auc"].notna().sum()),
