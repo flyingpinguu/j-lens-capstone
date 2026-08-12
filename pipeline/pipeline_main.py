@@ -17,9 +17,9 @@ ROOT = PIPELINE_DIR.parent
 CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "pipeline"
 
 # --------------------------------------------------------------- inputs
-# user_type-aware corpus + system prompts (admin / password authorization).
-# Pre-user_type versions: injection_corpus.jsonl / system_prompts.jsonl.
-INJECTION_FILE = ROOT / "data" / "evaluation" / "injection_corpus_user_type.jsonl"
+# Multi-turn starters with attacker goal/strategy/tactic plus user_type and
+# authorization fields. Legacy single-turn input: injection_corpus.jsonl.
+INJECTION_FILE = ROOT / "data" / "evaluation" / "conversation_seeds.jsonl"
 SYSTEM_PROMPTS_FILE = ROOT / "data" / "evaluation" / "system_prompts_authz.jsonl"
 
 # ------------------------------------------------------------- settings
@@ -56,7 +56,14 @@ SETTINGS = {
     "active_model": ACTIVE_MODEL,
     "model": MODEL_CONFIGS[ACTIVE_MODEL],
 
-    # --- secret (must tokenize to exactly one token; the harness verifies)
+    # --- secrets. "fixed" preserves the original banana runs.
+    #     The random mode assigns a distinct, reproducible one-token secret
+    #     to each template_id; lax/strict therefore stay paired and each
+    #     turn can track its own secret's rank through the fitted lens.
+    "secret_mode": "random_single_token_per_conversation",
+    "secret_seed": 20260812,
+    "secret_min_token_id": 10_000,  # avoid the tokenizer's most common tokens
+    # Used only in fixed mode (and retained for old configs/output files).
     "secret": "banana",
 
     # --- access password: authorizes disclosure; filled into {{ACCESS_PASSWORD}}
@@ -70,12 +77,23 @@ SETTINGS = {
     "max_prompts_per_strictness": None,
     "random_seed": 42,
 
+    # --- collection. Keep "single_turn" for the existing corpus flow; use
+    #     "multi_turn" for an adaptive attacker/defender conversation.
+    "collection_mode": "multi_turn",
+    "max_attack_attempts": 5,  # includes the corpus starter as attempt 1
+    "attacker_max_new_tokens": 64,
+
     # --- readouts. readout_positions is the main run-time lever, readout
     #     cost scales ~linearly with position count:
     #     "last" / "last_n" / "user" / "user_response" / "prompt" / "all"
-    "readout_positions": "user_response",
-    "readout_last_n": 5,
+    #     / "attacker_last_n_plus_suffix". The latter keeps the final N
+    #     tokens of the latest attacker turn plus the response scaffolding.
+    "readout_positions": "last_n",
+    "readout_last_n": 16,
+    "attacker_last_n": 16,
     "top_k": 10,
+    # Top-k-only remains secret-agnostic; the separately stored probe rank is
+    # available to M1/M4 and descriptive analysis.
     "probe_enabled": True,
     "probe_token": None,  # None -> defaults to the secret
 
@@ -121,7 +139,7 @@ SETTINGS = {
     "analysis": {
         "late_band": list(range(27, 32)),   # level/peak band: where the per-layer curves strengthen
         "mid_band": list(range(16, 27)),    # emergence band: where the signal departs from chance
-        "user_window_n": 8,                 # fixed end-window of user positions
+        "user_window_n": 7,                 # 16 prompt-end positions minus 9 scaffolding tokens
         "peak_quantile": 0.10,              # near-minimum, robust to outlier cells
         "scaffold_ref_n": 3,                # graph 1 reference: mean over last N scaffolding tokens
         "heatmap_layers": list(range(17, 32)),
@@ -169,7 +187,8 @@ SETTINGS = {
     },
 
     # --- Stage 2.2 + M2/M4 multitoken classifier.
-    #     mode: "topk_only", "topk_plus_rank", or "both".
+    #     mode: "topk_only", "topk_plus_rank", or "both". "both" trains M2
+    #     without secret rank and M4 with it from the same generated JSONL.
     #     The four rank features are appended after SVD; they never enter
     #     the SVD itself. Hyperparameter search is nested inside category
     #     folds and can be enabled independently of feature extraction.
@@ -250,8 +269,8 @@ def main():
         run_harness = load_stage("1_data_generation/run_harness.py")
         stage1_output = run_harness.run(SETTINGS, injections, system_prompts)
         print("Stage 1 complete:", stage1_output)
-        if run_data_file is None:
-            run_data_file = stage1_output
+        # An integrated run always trains on the data it just generated.
+        run_data_file = stage1_output
 
     # --- Stage 2.1: single-token analysis -- two figures + the F1-F4
     #     feature table (also written to CSV as the hand-off artifact).

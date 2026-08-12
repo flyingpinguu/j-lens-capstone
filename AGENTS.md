@@ -30,6 +30,13 @@ people, 4 weeks.
   Methodology guardrails for the correlation/alignment risk to manage while
   building this, and Deliverable order below for where it sits relative to
   the localization work.
+- **New collection track:** multi-turn attacker/defender conversations. A
+  corpus prompt is attempt 1; the attacker adapts for at most five total
+  attempts and the conversation stops immediately on disclosure. Each
+  defender turn is one JSONL/classifier row. New runs use a reproducible,
+  unique one-token secret per conversation. Top-k-only features remain
+  secret-agnostic while the per-row secret rank is available as an optional
+  analysis/classifier feature. Fixed-`banana` outputs remain supported.
 - Pipeline work is in progress (first version). Treat existing
   pipeline code as the starting point to align with these guardrails, not to
   rebuild from scratch — but flag any conflicts with the rules below rather
@@ -98,13 +105,24 @@ Keep this reimplementation consistent with `apply()`'s actual behavior in
   like the attack categories, or always included in every fold as a negative
   baseline. Resolve explicitly before reporting cross-validated numbers —
   don't let this default silently per person/run.
-- **In first iteration, the secret is a single token.** Verify with
+- **The original fixed-secret analysis uses a single token.** Verify with
   `tokenizer.encode(word, add_special_tokens=False)` → length must be 1, in
   the exact form it appears in-context (leading space matters for BPE
   tokenizers). Currently checked inline in `notebooks/j-lens-run.ipynb`
   (model/lens loading cell) — `scripts/check_secret_token.py`, referenced
   here previously, does not exist yet; extract it there if a standalone
-  script is wanted.
+  script is wanted. The new multi-turn track intentionally uses a different
+  random one-token secret per conversation. Its token id is tracked by the
+  same `probe.rank`/`probe.logit` schema as the old `banana` runs. Top-k-only
+  classifiers ignore this field; rank and combined models may use it.
+- **Multi-turn rows are repeated observations, not independent samples.**
+  All attempts from one `conversation_id` must remain in the same split.
+  The current category-level split already implies this, but any future
+  split must preserve it explicitly. A turn before the leak is negative and
+  the disclosure turn is positive when the target is immediate next-response
+  leakage. Report conversation-level sensitivity or equal-conversation
+  weighting as a secondary check because long failures contribute more
+  negative turns.
 - **Core claim rests on one model, one fitted lens.** A second model
   requires its own separately fitted lens (fine-tuning shifts internal
   representations), so a layer-level difference between two models cannot be
@@ -135,12 +153,18 @@ Keep this reimplementation consistent with `apply()`'s actual behavior in
 Two separate tables, joined by `run_id`. Do not merge them into one wide
 table — they have different shapes and purposes.
 
-In the current run harness (`notebooks/j-lens-run.ipynb`), "two dataframes"
+In the legacy run harness (`notebooks/j-lens-run.ipynb`), "two dataframes"
 (one per system prompt) means **one** combined per-run JSONL/dataframe with
 `strictness` / `system_id` / `label` columns, not two physical output files
 — split downstream by filtering on those columns. The row set is a full
 cross-join: every `injection_corpus.jsonl` row (attack **and** `control`) is
 run once per system prompt.
+
+In the multi-turn harness (`pipeline/1_data_generation/run_harness.py`), the
+physical JSONL instead has one row per defender turn. `conversation_id`
+joins attempts, `attempt_index` records order but is metadata rather than a
+classifier feature, and each row's target describes only its immediately
+following defender response.
 
 **1. Per-run record (wide, one row per prompt run) — primary quantitative
 signal.**
@@ -171,15 +195,18 @@ table 2.
 
 ## Data files
 
-Only `data/evaluation/injection_corpus.jsonl` and
-`data/evaluation/system_prompts.jsonl` are current inputs to the jlens
-pipeline. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
+Current multi-turn inputs are
+`data/evaluation/conversation_seeds.jsonl` and
+`data/evaluation/system_prompts_authz.jsonl`. The former adds `goal`,
+`tactic`, `tactic_instruction`, and `attacker_strategy` to the starter
+prompts. `data/evaluation/injection_corpus.jsonl` and
+`data/evaluation/system_prompts.jsonl` remain supported for legacy
+single-turn/fixed-secret runs. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
 `jlens_pilot_test_20.jsonl`, `pilot_train.jsonl`, `train.jsonl`) and
 `scripts/export_synthetic_responses.py` (with its `outputs/qwen35-4b-lora-*`
-artifacts) are a pre-single-token-secret legacy track — multi-token secrets
-like `TRAIN-AMBER-PINE-1137`, no `jlens` involvement, disconnected from the
-run harness. Do not wire them into the jlens pipeline; doing so would
-violate the single-token-secret guardrail above.
+artifacts) are an older unrelated track — multi-token secrets like
+`TRAIN-AMBER-PINE-1137`, no `jlens` involvement, disconnected from the run
+harness. Do not wire those files into the jlens pipeline.
 
 Current run outputs, `outputs/j-lens-run/`:
 - `qwen35-4b-full-corpus.jsonl` — `READOUT_POSITIONS = "last"`, one position
@@ -209,6 +236,24 @@ Current run outputs, `outputs/j-lens-run/`:
   `origin/<branch>` content directly if it matters.
 
 ## Run harness notes (`notebooks/j-lens-run.ipynb`)
+
+The active reusable harness is `pipeline/1_data_generation/run_harness.py`;
+the notebook and old output formats remain compatible inputs.
+
+- `collection_mode = "single_turn" | "multi_turn"` switches between the
+  old one-response flow and adaptive conversations. `max_attack_attempts`
+  includes the corpus starter. The attacker sees the visible dialogue and
+  its own goal/strategy/tactic, never the defender system prompt or secret.
+- `secret_mode = "fixed" | "random_single_token_per_conversation"`. Random
+  secrets are deterministically assigned from `secret_seed + template_id`,
+  so lax and strict use the same secret and resume is stable. Each assigned
+  string is verified to remain exactly one token in both system prompts;
+  set `probe_enabled=True` to save its rank/logit at every readout cell.
+- The current multi-turn default is `readout_positions = "last_n"` with
+  `readout_last_n = 16`: exactly the final 16 tokens of the complete defender
+  prompt, including its response scaffolding and never response tokens. The
+  alternative `"attacker_last_n_plus_suffix"` mode stores the final N current
+  attacker tokens plus all scaffolding and is therefore wider than 16 rows.
 
 - `READOUT_POSITIONS` (`"last"` / `"last_n"` / `"user"` / `"prompt"` / `"all"`) controls how many
   sequence positions get a lens readout per run — the main lever on run

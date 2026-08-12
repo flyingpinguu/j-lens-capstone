@@ -24,3 +24,7 @@ outputs/**/checkpoint-epoch-*/
 
 # Local files inside the upstream checkout are managed by its own Git repository.
 external/anthropic/jacobian-lens/.DS_Store
+
+# Local, reproducible multi-turn smoke-run artifacts.
+tmp/multiturn-smoke/
+tmp/interface-classifier-data/

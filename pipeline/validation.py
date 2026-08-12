@@ -66,7 +66,10 @@ def make_fold_plan(df, validation_cfg, id_col="run_id", category_col="category")
     if not df[id_col].is_unique:
         raise ValueError(f"{id_col} must be unique when building the fold plan")
 
-    plan = df[[id_col, category_col]].rename(
+    columns = [id_col, category_col]
+    if "conversation_id" in df:
+        columns.append("conversation_id")
+    plan = df[columns].rename(
         columns={id_col: "run_id", category_col: "category"}
     ).copy()
     holdout = set(validation_cfg["holdout_categories"])
@@ -87,6 +90,14 @@ def make_fold_plan(df, validation_cfg, id_col="run_id", category_col="category")
     folds_per_category = plan[plan["split"].eq("dev")].groupby("category")["fold"].nunique()
     if not folds_per_category.eq(1).all():
         raise RuntimeError("a category was split across multiple folds")
+    if "conversation_id" in plan:
+        folds_per_conversation = (
+            plan[plan["split"].eq("dev")]
+            .groupby("conversation_id")["fold"]
+            .nunique()
+        )
+        if not folds_per_conversation.eq(1).all():
+            raise RuntimeError("a multi-turn conversation was split across folds")
     return plan.reset_index(drop=True)
 
 
