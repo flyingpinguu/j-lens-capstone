@@ -17,6 +17,15 @@ from sklearn.decomposition import TruncatedSVD
 
 def _prompt_positions(row):
     """Saved user + scaffolding positions in chronological order."""
+    if row.get("readout_scope") == "last_n":
+        # The multi-turn track aligns examples by exact distance from the
+        # defender prompt end. Short current messages can therefore include a
+        # few preceding chat-template/history tokens among these 16 positions.
+        return sorted(
+            int(position)
+            for position in row["readouts"]
+            if int(position) < row["response_start_position"]
+        )
     return sorted(
         int(position)
         for position, readout in row["readouts"].items()
@@ -74,8 +83,13 @@ def run(settings, input_file):
 
             metadata_rows.append({
                 "run_id": row["id"],
+                "conversation_id": row.get("conversation_id", row["id"]),
+                "attempt_index": row.get("attempt_index", 1),
+                "template_id": row["template_id"],
+                "label": row["label"],
                 "category": row["category"],
                 "system_id": row["system_id"],
+                "authorized": bool(row.get("authorized", False)),
                 "actual_leaked": bool(row["attack_successful"]),
             })
             all_ids.append(run_ids)

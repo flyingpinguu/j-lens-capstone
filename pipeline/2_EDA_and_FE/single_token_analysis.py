@@ -88,8 +88,13 @@ def collect(input_file, analysis_cfg):
             user_positions, scaffold_positions = positions_by_segment(readouts)
             meta = {
                 "id": row["id"],
+                "conversation_id": row.get("conversation_id", row["id"]),
+                "attempt_index": row.get("attempt_index", 1),
+                "template_id": row["template_id"],
+                "label": row["label"],
                 "category": row["category"],
                 "system_id": row["system_id"],
+                "authorized": bool(row.get("authorized", False)),
                 "attack_successful": row["attack_successful"],
             }
 
