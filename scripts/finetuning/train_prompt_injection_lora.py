@@ -16,7 +16,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAIN_FILE = ROOT / "data" / "training" / "qwen35-4b-pi-r8-stage1-120.jsonl"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "qwen35-4b-lora-pi-r8-stage1-120"
 MODEL_ID = "Qwen/Qwen3.5-4B"

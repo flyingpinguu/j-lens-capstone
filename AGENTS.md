@@ -195,45 +195,33 @@ table 2.
 
 ## Data files
 
-Current multi-turn inputs are
+Current single- and multi-turn inputs are
 `data/evaluation/conversation_seeds.jsonl` and
 `data/evaluation/system_prompts_authz.jsonl`. The former adds `goal`,
 `tactic`, `tactic_instruction`, and `attacker_strategy` to the starter
 prompts. `data/evaluation/injection_corpus.jsonl` and
 `data/evaluation/system_prompts.jsonl` remain supported for legacy
 single-turn/fixed-secret runs. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
-`jlens_pilot_test_20.jsonl`, `pilot_train.jsonl`, `train.jsonl`) and
-`scripts/export_synthetic_responses.py` (with its `outputs/qwen35-4b-lora-*`
-artifacts) are an older unrelated track — multi-token secrets like
+`jlens_pilot_test_20.jsonl`, `pilot_train.jsonl`, `train.jsonl`) is an older
+unrelated track — multi-token secrets like
 `TRAIN-AMBER-PINE-1137`, no `jlens` involvement, disconnected from the run
 harness. Do not wire those files into the jlens pipeline.
 
 Current run outputs, `outputs/j-lens-run/`:
-- `qwen35-4b-full-corpus.jsonl` — `READOUT_POSITIONS = "last"`, one position
-  per run (last prompt position, i.e. the last scaffolding token — see
-  below). Table 1 only.
-- `qwen35-4b-full-corpus-user-positions.jsonl` — `"user"` mode, every
-  user-message position, no scaffolding or response.
-- `qwen35-4b-full-corpus-user-response-positions-top10.jsonl` — the richest
-  run so far: every `user` and `response` position (`readout_scope:
-  "user_response"` — system prompt itself still not captured), each
-  position's `segment` explicitly labeled `"user"`, `"prompt_suffix"`
-  (the chat-template turn-boundary tokens between the user message and
-  generation — a fixed 9-token span, `<|im_end|>\n<|im_start|>assistant\n
-  <think>\n\n</think>\n\n`, identical across every run since it doesn't
-  depend on prompt content), or `"response"`. Built on the expanded
-  660-row corpus (1320 runs). Large (~1GB) — read it in a single streaming
-  pass, not into one big in-memory list; see
-  `notebooks/analysis_friedrich/secret_token_analysis.ipynb` for the
-  pattern. `response` positions should not be used as classifier features —
-  predicting the response's own outcome from the response is circular.
-- `qwen35-4b-pilot-test-20.jsonl` — legacy (multi-token secret, pre-dates the
-  single-token guardrail). Also has a standing repo-hygiene quirk: it's
-  `.gitattributes`-marked for Git LFS but was committed as a raw (non-LFS)
-  blob at some point in history, so `git status`/`git diff` will show it as
-  perpetually "modified" even when the working-tree bytes are unchanged —
-  don't trust that signal for this specific file, diff against
-  `origin/<branch>` content directly if it matters.
+- `qwen35-4b-random-single-token-seed20260812-attack-authorized-sys_strict-`
+  `full-corpus-last-16-prompt-plus-response-positions-top10.jsonl` — current
+  primary run: 478 attacks plus 60 authorized requests, one response each,
+  strict system prompt, unique one-token secrets, final 16 complete prompt
+  positions plus every response position. Prompt classifiers must filter out
+  response positions; response readouts are retrospective analysis only.
+- `qwen35-4b-full-corpus-user-response-positions-top10-relabeled.jsonl` —
+  canonical legacy single-turn run across lax and strict prompts. It retains
+  all user/response positions and corrected leakage labels for backwards-
+  compatibility checks. Stream it rather than loading the ~1GB JSONL whole.
+- `qwen35-4b-multi-turn-5-attempts-random-single-token-seed20260812-`
+  `full-corpus-last-16-positions-top10.jsonl` — previous multi-turn run,
+  retained as a documented negative/shortcut experiment rather than the
+  primary training dataset.
 
 ## Run harness notes (`notebooks/j-lens-run.ipynb`)
 
@@ -295,7 +283,7 @@ the notebook and old output formats remain compatible inputs.
   `outputs/j-lens-run/*.jsonl` (see `.gitattributes`). `git pull` /
   `git reset --hard` can hang well past 2 minutes on the LFS smudge step
   when a run adds/changes a large tracked output (seen with the ~1GB
-  `qwen35-4b-full-corpus-user-response-positions-top10.jsonl`) — the
+  `qwen35-4b-full-corpus-user-response-positions-top10-relabeled.jsonl`) — the
   ordinary git-level update (files, ref, index) actually finishes quickly,
   it's fetching the real LFS blob content that's slow. If a pull seems
   stuck, `GIT_LFS_SKIP_SMUDGE=1 git pull` (or `reset --hard`) finishes the

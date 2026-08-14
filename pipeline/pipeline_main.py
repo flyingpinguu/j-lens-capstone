@@ -14,7 +14,8 @@ from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 ROOT = PIPELINE_DIR.parent
-CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "pipeline"
+RUN_TAG = "singleturn-strict-attack-authorized"
+CLASSIFIER_OUTPUT_DIR = ROOT / "outputs" / "pipeline" / RUN_TAG
 
 # --------------------------------------------------------------- inputs
 # Multi-turn starters with attacker goal/strategy/tactic plus user_type and
@@ -76,19 +77,24 @@ SETTINGS = {
     #     (the same sample is paired with every system prompt)
     "max_prompts_per_strictness": None,
     "random_seed": 42,
+    # Current collection cohort: attacks plus legitimate requests, evaluated
+    # only under the strict system prompt. Neither field becomes a feature.
+    "include_labels": ["attack", "authorized"],
+    "include_system_ids": ["sys_strict"],
 
     # --- collection. Keep "single_turn" for the existing corpus flow; use
     #     "multi_turn" for an adaptive attacker/defender conversation.
-    "collection_mode": "multi_turn",
+    "collection_mode": "single_turn",
     "max_attack_attempts": 5,  # includes the corpus starter as attempt 1
     "attacker_max_new_tokens": 64,
 
     # --- readouts. readout_positions is the main run-time lever, readout
     #     cost scales ~linearly with position count:
     #     "last" / "last_n" / "user" / "user_response" / "prompt" / "all"
-    #     / "attacker_last_n_plus_suffix". The latter keeps the final N
-    #     tokens of the latest attacker turn plus the response scaffolding.
-    "readout_positions": "last_n",
+    #     / "attacker_last_n_plus_suffix" / "last_n_prompt_plus_response".
+    #     The final mode is the compact retrospective setup: final N complete
+    #     prompt tokens (including scaffolding) plus the generated response.
+    "readout_positions": "last_n_prompt_plus_response",
     "readout_last_n": 16,
     "attacker_last_n": 16,
     "top_k": 10,
@@ -133,9 +139,10 @@ SETTINGS = {
     #     per-model config: for a second model, re-derive them from that
     #     model's own curves (docs/pipeline_architecture.md).
     "analysis_input_file": ROOT / "outputs" / "j-lens-run" / (
-        "qwen35-4b-full-corpus-user-response-positions-top10-relabeled.jsonl"
+        "qwen35-4b-random-single-token-seed20260812-attack-authorized-"
+        "sys_strict-full-corpus-last-16-prompt-plus-response-positions-top10.jsonl"
     ),
-    "analysis_output_dir": ROOT / "outputs" / "analysis",
+    "analysis_output_dir": ROOT / "outputs" / "analysis" / RUN_TAG,
     "analysis": {
         "late_band": list(range(27, 32)),   # level/peak band: where the per-layer curves strengthen
         "mid_band": list(range(16, 27)),    # emergence band: where the signal departs from chance

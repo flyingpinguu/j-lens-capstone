@@ -17,10 +17,11 @@ from sklearn.decomposition import TruncatedSVD
 
 def _prompt_positions(row):
     """Saved user + scaffolding positions in chronological order."""
-    if row.get("readout_scope") == "last_n":
-        # The multi-turn track aligns examples by exact distance from the
-        # defender prompt end. Short current messages can therefore include a
-        # few preceding chat-template/history tokens among these 16 positions.
+    if row.get("readout_scope") in {"last_n", "last_n_prompt_plus_response"}:
+        # Compact runs align examples by exact distance from the defender
+        # prompt end. Short current messages can therefore include a few
+        # preceding chat-template/history tokens among these 16 positions.
+        # Response positions remain excluded even when they share the JSONL.
         return sorted(
             int(position)
             for position in row["readouts"]

@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "data" / "evaluation" / "injection_corpus.jsonl"
 DEFAULT_TRAIN = ROOT / "data" / "training" / "qwen35-4b-pi-r8-stage1-120.jsonl"
 DEFAULT_OUTPUT = ROOT / "data" / "evaluation" / "qwen35-4b-pi-consolidated-90.jsonl"

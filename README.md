@@ -1,33 +1,30 @@
 # J-Lens Capstone
 
-This project studies whether LoRA fine-tuning for prompt-injection resistance changes both the output behavior and the internal layer representations of `Qwen/Qwen3.5-4B`.
-
-The base and fine-tuned models are tested with system prompts containing protected values. Their leak rates and normal-task behavior are compared, while Jacobian Lens is used to inspect where injected instructions begin to influence the model across layers.
+This project studies whether Jacobian-Lens readouts from `Qwen/Qwen3.5-4B`
+predict whether a prompt injection leaks a protected one-token secret. The
+current primary dataset uses one attack or authorized request, one response,
+unique secrets, and the strict system prompt.
 
 ## Repository structure
 
 ```text
 j-lens-capstone/
 ├── README.md
-├── data/
-│   ├── training/                 # LoRA training conversations
-│   └── evaluation/               # Held-out synthetic test prompts
-├── docs/
-│   └── project-description.md    # Extended research question and hypothesis
+├── data/evaluation/              # Injection corpus and system prompts
 ├── external/
 │   └── anthropic/
 │       └── jacobian-lens/        # Separate upstream Anthropic repository
-├── notebooks/
-│   ├── j-lens-run.ipynb          # Response generation and J-Lens readouts
-│   ├── analysis_alex/
-│   │   └── j-lens-analysis.ipynb # Quantitative analysis and ML features
-│   └── analysis_friedrich/       # Friedrich's analysis notebooks
-├── outputs/
-│   ├── qwen35-4b-lora-pilot/    # Trained pilot adapter
-│   ├── qwen35-4b-lora-smoke/    # Initial smoke-test adapter
-│   └── synthetic_test_responses.jsonl
+├── pipeline/
+│   ├── 1_data_generation/        # Response generation and J-Lens readouts
+│   ├── 2_EDA_and_FE/             # Secret-rank and Top-k/SVD features
+│   ├── 3_model_predictions/      # M1-M4 classifiers
+│   ├── pipeline_main.py          # Current end-to-end configuration
+│   └── validation.py             # Shared category-grouped folds
+├── notebooks/                    # Exploratory and presentation analyses
+├── outputs/j-lens-run/           # Generated JSONL readouts
 └── scripts/
-    └── export_synthetic_responses.py
+    ├── finetuning/               # LoRA training/evaluation
+    └── jlensfitting/             # Lens fitting for the LoRA model
 ```
 
 The Anthropic Jacobian Lens checkout is included as a pinned Git submodule.
@@ -36,8 +33,19 @@ The Anthropic Jacobian Lens checkout is included as a pinned Git submodule.
 
 Clone the project together with the Anthropic submodule, install Git LFS, and create a Python 3.11 virtual environment. The Python dependencies used for the recorded run are listed in `requirements.txt`.
 
-The scripts download `Qwen/Qwen3.5-4B` from Hugging Face when it is not cached locally. Set `HF_LOCAL_FILES_ONLY=1` to force offline-only loading. The trained LoRA adapter is stored in Git LFS and is applied to the unchanged base model at runtime.
+The scripts download `Qwen/Qwen3.5-4B` from Hugging Face when it is not
+cached locally. The Anthropic checkout is a pinned Git submodule, and large
+run files and model artifacts use Git LFS.
 
-## Current pilot result
+## Run the current pipeline
 
-The synthetic held-out evaluation reduced exact protected-value leaks from `30/42` for the unmodified model to `0/42` with the LoRA adapter. A small independently written holdout test still found one successful transformed leak, so the adapter is a proof of concept rather than a complete security solution.
+With an existing JSONL configured in `pipeline/pipeline_main.py`:
+
+```bash
+.venv/bin/python pipeline/pipeline_main.py
+```
+
+This trains M1 (secret-rank models), M2 (Top-k/SVD), M3 (soft vote), and M4
+(Top-k/SVD plus rank features). Validation uses shared `GroupKFold` splits by
+injection category; the configured final holdout remains untouched unless
+explicitly enabled.

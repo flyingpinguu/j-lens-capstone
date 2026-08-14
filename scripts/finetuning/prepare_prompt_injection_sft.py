@@ -17,7 +17,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "data" / "evaluation" / "injection_corpus.jsonl"
 DEFAULT_SYSTEM_PROMPTS = ROOT / "data" / "evaluation" / "system_prompts.jsonl"
 DEFAULT_RUN_FILE = (
