@@ -5,14 +5,32 @@ what's still open. Not a final write-up; source of truth for what's actually
 been checked vs. still assumed. See `AGENTS.md` for the methodology rules
 these findings were produced under.
 
-## Current setup (as of the sys_strict multi-turn run)
+## Current setup (sys_strict, single turn, random secrets)
 
-Everything below the "earlier single-turn findings" heading was measured on
-the old pooled single-turn corpus with the fixed `banana` secret. The
-project has since moved to: `sys_strict` only, multi-turn conversations, a
-random one-token secret per conversation, and a corpus that includes
-*authorized* requests (admin role / correct access password). Numbers from
-the two setups are not comparable.
+The primary dataset is now one request and one response per run, `sys_strict`
+only, with a reproducible random one-token secret per request. It contains
+478 attacks plus 60 authorized requests. The final 16 complete prompt
+positions and all response positions were recorded; classifiers use prompt
+positions only. The 412-row development split has 171 leaks.
+
+**Current Stage-3 result** (GroupKFold by category; mean fold AUC ± std):
+
+| model | all runs | unauthorized only |
+|---|---|---|
+| M1 logreg, lens features | 0.476 ± 0.056 | 0.473 ± 0.074 |
+| M1 logreg, lens + metadata | 0.574 ± 0.185 | 0.480 ± 0.098 |
+| M2, top-k only | 0.675 ± 0.084 | 0.655 ± 0.137 |
+| M3, soft vote | 0.653 ± 0.063 | 0.636 ± 0.130 |
+| M4, top-k + secret rank | 0.676 ± 0.071 | 0.659 ± 0.145 |
+
+M4 is effectively tied with M2 here, so adding secret-rank features does not
+provide a material lift. M1's metadata lift on all rows mostly disappears in
+the unauthorized cohort and varies strongly by held-out category.
+
+## Previous multi-turn shortcut audit (not the primary dataset)
+
+The following results are retained because they motivated the return to the
+single-turn collection design. They are not comparable to the current table.
 
 **Stage 3 on the multi-turn sys_strict run** (1962 dev runs, 205 leaks,
 GroupKFold by category, `outputs/analysis/qwen35-4b/model_comparison_per_cohort.png`):

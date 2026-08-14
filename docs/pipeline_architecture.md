@@ -104,21 +104,21 @@ request metadata a deployment already has (`lens_meta` =
 `user_type_is_admin`, `authorized`). Models are named
 `<variant>__<feature set>`. Because `attack_successful` is defined as
 "secret revealed **and** not authorized", `authorized` decides the label on
-its own for 161 of the 2 320 runs — so both feature sets are also reported
+its own for the 60 authorized requests in the current 538-run dataset — so both feature sets are also reported
 on the unauthorized-only cohort, where it cannot (see the cohort note
 below).
 M1/M2 establish what each track's signal is worth alone. M3 (average of
 M1's and M2's predicted probabilities — no trained meta-learner) tests
 whether the two signals are complementary or redundant: if M3 ≈ M1, the
 top-k signal adds little beyond secret rank — itself a reportable finding.
-The current implementation combines `m1_logreg` with `m2_topk_only`; both
+The current implementation combines `m1_logreg__lens` with `m2_topk_only`; both
 choices are explicit in `SETTINGS["m3"]`. It computes a separate soft-vote
 probability and ROC-AUC for every prompt position. M3 verifies matching ids,
 categories, targets, and fold numbers before averaging, then writes one
 metrics table and one row-level prediction table.
 M4 is the accuracy-maximizing headline number. This is the ensemble insight
-of full stacking without its nested-CV cost, which our sample size
-(~220–440 rows per system prompt, ~12 fold groups) doesn't support.
+of full stacking without its nested-CV cost, which the current development
+sample (412 rows across category folds) doesn't support.
 
 **Stage-3 guardrails** (so the comparison stays honest — see `AGENTS.md`):
 
@@ -129,7 +129,7 @@ of full stacking without its nested-CV cost, which our sample size
   search: tune inside the folds (nested CV), never on the evaluation split.
 - Start from a small, hand-picked, plausibly-independent feature set
   (adjacent layers and adjacent positions are highly correlated) — not full
-  clustering + stacking, given ~220–440 rows per system prompt. M3 stays a
+  clustering + stacking, given the current sample size. M3 stays a
   parameter-free average for the same reason: no trained meta-learner.
 - One shared fold definition for all four models — scores from different
   splits are not comparable.

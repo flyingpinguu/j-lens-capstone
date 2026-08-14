@@ -15,7 +15,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 MODEL_ID = "Qwen/Qwen3.5-4B"
 DEFAULT_ADAPTER = ROOT / "outputs" / "qwen35-4b-lora-pi-r8-stage1-120"
 DEFAULT_VALIDATION = (

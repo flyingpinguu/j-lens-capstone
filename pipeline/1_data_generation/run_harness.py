@@ -193,6 +193,15 @@ def assign_single_token_secrets(settings, injections, system_prompts, tokenizer)
 
 def output_file_for(settings):
     """Same naming scheme as the notebook, so resume files stay compatible."""
+    filter_tags = []
+    if settings.get("include_labels"):
+        filter_tags.append("-".join(sorted(settings["include_labels"])))
+    if settings.get("include_system_ids"):
+        filter_tags.append("-".join(sorted(settings["include_system_ids"])))
+    filter_tag = "-".join(filter_tags)
+    if filter_tag:
+        filter_tag += "-"
+
     if settings.get("template_ids"):
         scope_tag = f"selected-{len(settings['template_ids'])}-prompts"
     elif settings["max_prompts_per_strictness"] is None:
@@ -204,6 +213,8 @@ def output_file_for(settings):
         )
     if settings["readout_positions"] == "last_n":
         readout_tag = f"last-{settings['readout_last_n']}"
+    elif settings["readout_positions"] == "last_n_prompt_plus_response":
+        readout_tag = f"last-{settings['readout_last_n']}-prompt-plus-response"
     elif settings["readout_positions"] == "attacker_last_n_plus_suffix":
         readout_tag = f"attacker-last-{settings['attacker_last_n']}-plus-suffix"
     else:
@@ -215,7 +226,7 @@ def output_file_for(settings):
     if settings.get("secret_mode", "fixed") == "random_single_token_per_conversation":
         secret_tag = f"random-single-token-seed{settings['secret_seed']}-"
     return settings["output_dir"] / (
-        f"{settings['active_model']}-{collection_tag}{secret_tag}{scope_tag}-"
+        f"{settings['active_model']}-{collection_tag}{secret_tag}{filter_tag}{scope_tag}-"
         f"{readout_tag}-positions-"
         f"top{settings['top_k']}.jsonl"
     )
@@ -229,6 +240,8 @@ def resolve_readout_positions(
     ``attacker_last_n_plus_suffix`` is the compact multi-turn mode: it keeps
     the final N tokens of the latest attacker message and all fixed chat
     template tokens between that message and the defender response.
+    ``last_n_prompt_plus_response`` keeps exactly N complete prompt positions
+    (including scaffolding) followed by every generated response position.
     """
     mode = settings["readout_positions"]
     if mode == "user":
@@ -246,6 +259,9 @@ def resolve_readout_positions(
     if mode == "last_n":
         start = max(0, prompt_length - settings["readout_last_n"])
         return list(range(start, prompt_length))
+    if mode == "last_n_prompt_plus_response":
+        start = max(0, prompt_length - settings["readout_last_n"])
+        return list(range(start, total_length))
     if mode == "attacker_last_n_plus_suffix":
         if not user_positions:
             raise ValueError("No attacker token positions found")
@@ -297,9 +313,26 @@ def build_run_rows(settings, injections, system_prompts, tokenizer=None):
     `strictness`/`system_id`) cover the same prompts and are directly
     comparable. Full runs preserve corpus order; capped runs sample without
     replacement with the configured seed."""
+    selected_system_ids = settings.get("include_system_ids")
+    if selected_system_ids:
+        selected_system_ids = set(selected_system_ids)
+        system_prompts = [
+            row for row in system_prompts if row["system_id"] in selected_system_ids
+        ]
+        missing = selected_system_ids - {row["system_id"] for row in system_prompts}
+        if missing:
+            raise ValueError(f"Unknown include_system_ids: {sorted(missing)}")
+
     system_prompt_by_strictness = {row["strictness"]: row for row in system_prompts}
 
     prompt_pool = injections
+    included_labels = settings.get("include_labels")
+    if included_labels:
+        included_labels = set(included_labels)
+        prompt_pool = [row for row in prompt_pool if row["label"] in included_labels]
+        missing = included_labels - {row["label"] for row in injections}
+        if missing:
+            raise ValueError(f"Unknown include_labels: {sorted(missing)}")
     if settings.get("template_ids"):
         selected = set(settings["template_ids"])
         prompt_pool = [row for row in prompt_pool if row["template_id"] in selected]
@@ -369,7 +402,7 @@ def build_run_rows(settings, injections, system_prompts, tokenizer=None):
                     row[key] = prompt_row[key]
             rows.append(row)
 
-    print("Corpus rows (attack + control):", len(prompt_pool))
+    print("Selected corpus rows:", len(prompt_pool))
     print("Total runs (corpus x system prompts):", len(rows))
     return rows
 
@@ -650,9 +683,14 @@ def run(settings, injections, system_prompts):
         ]
         # Response activations are needed only for modes that explicitly ask
         # for them. The compact multi-turn mode forwards the prompt alone.
+        response_readout_modes = {
+            "all",
+            "user_response",
+            "last_n_prompt_plus_response",
+        }
         readout_input_ids = (
             generated_ids
-            if readout_positions_mode in {"all", "user_response"}
+            if readout_positions_mode in response_readout_modes
             else inputs.input_ids
         )
 
