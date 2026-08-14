@@ -40,10 +40,10 @@ flowchart TD
     COR --> HARN
     ML --> HARN
 
-    subgraph S21["2.1 Single-token analysis"]
+    subgraph S21["2.1 Single-token analysis (sys_strict only)"]
         direction TB
-        A1["2.1.1 Analysis findings:<br/>layer × prompt-position analysis<br/>→ saved figures per research question"]:::ana
-        F1["2.1.2 Four compact<br/>single-token rank features"]:::iface2
+        A1["2.1.1 Analysis findings:<br/>layer × prompt-position analysis,<br/>all runs vs. unauthorized only<br/>→ saved figures per research question"]:::ana
+        F1["2.1.2 Single-token rank<br/>feature bank + request metadata"]:::iface2
         A1 --> F1
     end
 
@@ -62,7 +62,7 @@ flowchart TD
         FOLDS["3.1 Shared fold definition<br/>(GroupKFold by category — fixed once,<br/>used by all four models)"]:::cfg
         HP["3.2 Hyperparameter search<br/>(inside CV folds)"]:::proc
         FOLDS --> HP
-        M1["3.3.1 M1<br/>single-token<br/>features only"]:::ana
+        M1["3.3.1 M1<br/>single-token features:<br/>lens vs. lens+metadata"]:::ana
         M2["3.3.2 M2<br/>top-k<br/>features only"]:::ana
         M3["3.3.3 M3<br/>soft-voting ensemble<br/>of M1 + M2"]:::ana
         M4["3.3.4 M4<br/>combined features<br/>(headline)"]:::ana
@@ -98,18 +98,27 @@ The pipeline builds one explicit `run_id → split → fold` plan from the commo
 M1/M2 row universe after Top-k extraction. M1 and M2 consume this table
 instead of each calling `GroupKFold` independently; this also handles the
 short runs that Stage 2.2 cannot represent.
+M1 is itself a two-way comparison: each estimator variant is fitted once on
+the lens feature bank alone (`lens`) and once on the same bank plus the
+request metadata a deployment already has (`lens_meta` =
+`user_type_is_admin`, `authorized`). Models are named
+`<variant>__<feature set>`. Because `attack_successful` is defined as
+"secret revealed **and** not authorized", `authorized` decides the label on
+its own for the 60 authorized requests in the current 538-run dataset — so both feature sets are also reported
+on the unauthorized-only cohort, where it cannot (see the cohort note
+below).
 M1/M2 establish what each track's signal is worth alone. M3 (average of
 M1's and M2's predicted probabilities — no trained meta-learner) tests
 whether the two signals are complementary or redundant: if M3 ≈ M1, the
 top-k signal adds little beyond secret rank — itself a reportable finding.
-The current implementation combines `m1_logreg` with `m2_topk_only`; both
+The current implementation combines `m1_logreg__lens` with `m2_topk_only`; both
 choices are explicit in `SETTINGS["m3"]`. It computes a separate soft-vote
 probability and ROC-AUC for every prompt position. M3 verifies matching ids,
 categories, targets, and fold numbers before averaging, then writes one
 metrics table and one row-level prediction table.
 M4 is the accuracy-maximizing headline number. This is the ensemble insight
-of full stacking without its nested-CV cost, which our sample size
-(~220–440 rows per system prompt, ~12 fold groups) doesn't support.
+of full stacking without its nested-CV cost, which the current development
+sample (412 rows across category folds) doesn't support.
 
 **Stage-3 guardrails** (so the comparison stays honest — see `AGENTS.md`):
 
@@ -120,15 +129,23 @@ of full stacking without its nested-CV cost, which our sample size
   search: tune inside the folds (nested CV), never on the evaluation split.
 - Start from a small, hand-picked, plausibly-independent feature set
   (adjacent layers and adjacent positions are highly correlated) — not full
-  clustering + stacking, given ~220–440 rows per system prompt. M3 stays a
+  clustering + stacking, given the current sample size. M3 stays a
   parameter-free average for the same reason: no trained meta-learner.
 - One shared fold definition for all four models — scores from different
   splits are not comparable.
-- The multitoken leakage detector currently pools `sys_lax` and
-  `sys_strict`, with `system_id` retained only as metadata and never used as
-  a feature. This targets robustness across the two observed system-prompt
-  regimes; it does not by itself demonstrate generalization to an unseen
+- Scope is `sys_strict` only (`SETTINGS["system_ids"]`, applied in Stage 2.1
+  and 2.2 so both tracks and the shared fold plan cover the same runs).
+  Nothing is pooled across system prompts any more; every number in Stage 3
+  is a sys_strict number. `system_id` remains metadata and is never a
+  feature. Results therefore say nothing about generalization to an unseen
   system prompt.
+- **Reporting cohorts.** `validation.per_cohort_metrics` reports each model
+  twice: `all` (every dev run) and `unauthorized` (admin-role and
+  correct-password runs removed). Authorized runs are non-leaks by the
+  target's definition, so a metadata-aware model scores them for free and
+  its `all` number is inflated by exactly that; `unauthorized` is the
+  comparable one. An `authorized`-only cohort has no positives at all and
+  is skipped — its AUC is undefined, not zero.
 - Response positions are excluded as features (predicting the response's
   outcome from the response is circular).
 - Reported as its own number (accuracy-maximizing track), separate from the
@@ -169,12 +186,12 @@ explicit as a column (`lens_id`), not hidden.
 
 Physically, Stage 1 writes **one JSONL per run config** (see
 `outputs/j-lens-run/`): one JSON object per run with metadata (`strictness`/
-`system_id`, `template_id`, `category`), the generated response, the leak
-label (`attack_successful`), and hierarchical readouts (token position →
-layer → top-k tokens + secret-token probe rank/logit). Both system prompts
-live in the same file. The current Stage-3 configuration pools them into one
-classifier while retaining `system_id` as metadata, never as a feature;
-system-specific descriptive analyses can still filter the same table.
+`system_id`, `template_id`, `category`, `user_type`, `authorized`,
+`password`), the generated response, both outcome flags (`secret_revealed`
+and the target `attack_successful`), and hierarchical readouts (token
+position → layer → top-k tokens + secret-token probe rank/logit). A file may
+hold several system prompts; Stage 2 keeps only `SETTINGS["system_ids"]`
+(currently `sys_strict`).
 
 Downstream, the Stage-2 tracks read that JSONL into two derived views,
 joined by run id. They stay separate because their shapes differ: the

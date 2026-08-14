@@ -36,8 +36,15 @@ def _prompt_positions(row):
 
 
 def run(settings, input_file):
-    """Stream a run JSONL into run × position × layer × Top-k arrays."""
+    """Stream a run JSONL into run × position × layer × Top-k arrays.
+
+    ``settings["system_ids"]`` (None = every system prompt) is applied with
+    the same rule as Stage 2.1, so both tracks -- and therefore the shared
+    fold plan -- cover exactly the same runs.
+    """
     cfg = settings["multitoken"]
+    system_ids = settings.get("system_ids")
+    system_ids = set(system_ids) if system_ids is not None else None
     layers = tuple(cfg["layers"])
     top_k = cfg["top_k"]
     n_positions = cfg["n_prompt_positions"]
@@ -48,6 +55,7 @@ def run(settings, input_file):
 
     metadata_rows, all_ids, all_logits, skipped = [], [], [], []
     token_text = {}
+    n_skipped_system = 0
 
     with input_file.open(encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
@@ -57,6 +65,10 @@ def run(settings, input_file):
                 row = json.loads(line)
             except json.JSONDecodeError:
                 print(f"  skipping unparseable line {line_number}")
+                continue
+
+            if system_ids is not None and row["system_id"] not in system_ids:
+                n_skipped_system += 1
                 continue
 
             prompt_positions = _prompt_positions(row)
@@ -103,7 +115,9 @@ def run(settings, input_file):
         raise ValueError(f"Unexpected Top-k array shape: {token_ids.shape}, expected {expected}")
 
     print(f"Stage 2.2: {len(metadata_rows):,} runs, shape {token_ids.shape}; "
-          f"skipped {len(skipped)} runs shorter than {n_positions} positions")
+          f"skipped {len(skipped)} runs shorter than {n_positions} positions"
+          + (f", {n_skipped_system} runs outside system_ids={sorted(system_ids)}"
+             if system_ids is not None else ""))
     return {
         "metadata": pd.DataFrame(metadata_rows),
         "token_ids": token_ids,

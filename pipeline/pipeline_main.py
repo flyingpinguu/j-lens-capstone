@@ -12,6 +12,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import numpy as np
+
 PIPELINE_DIR = Path(__file__).resolve().parent
 ROOT = PIPELINE_DIR.parent
 RUN_TAG = "singleturn-strict-attack-authorized"
@@ -51,6 +53,25 @@ MODEL_CONFIGS = {
 
 ACTIVE_MODEL = "qwen35-4b"
 
+# Stage-2.1 hand-off: the frozen feature bank (2 layer bands x 6 position
+# aggregates) and the request metadata a deployment already knows at request
+# time. M1 fits one model per feature set from these two lists.
+LENS_FEATURES = [
+    "late_ref_level",        # F1: last scaffolding token, late band
+    "late_scaffold_ref_mean",
+    "late_user_last",
+    "late_user_peak",        # F2
+    "late_user_mean",
+    "scaffold_delta",        # F3
+    "mid_scaffold_last",
+    "mid_scaffold_ref_mean",
+    "mid_user_last",
+    "mid_user_peak",         # F4
+    "mid_user_mean",
+    "mid_scaffold_delta",
+]
+REQUEST_METADATA_FEATURES = ["user_type_is_admin", "authorized"]
+
 SETTINGS = {
     # --- model + lens (a second model is just a different entry here;
     #     it needs its own fitted lens, see AGENTS.md)
@@ -81,6 +102,14 @@ SETTINGS = {
     # only under the strict system prompt. Neither field becomes a feature.
     "include_labels": ["attack", "authorized"],
     "include_system_ids": ["sys_strict"],
+
+    # --- analysis/model scope: which system prompts Stage 2 and Stage 3
+    #     read from the run file (None = all of them). Team decision: the
+    #     project reports sys_strict only, so sys_lax rows in older pooled
+    #     run files are filtered out here rather than downstream. Stage 1
+    #     is unaffected -- it still generates whatever is in
+    #     SYSTEM_PROMPTS_FILE.
+    "system_ids": ["sys_strict"],
 
     # --- collection. Keep "single_turn" for the existing corpus flow; use
     #     "multi_turn" for an adaptive attacker/defender conversation.
@@ -132,12 +161,16 @@ SETTINGS = {
     #     safe but pointlessly slow for analysis-only work).
     "run_stage1": False,
 
-    # --- Stage-2 analysis. Input defaults to the relabeled run file
-    #     (corrected attack_successful labels, see
-    #     notebooks/analysis_alex/classifier-findings.md); set to None to
-    #     use the Stage-1 output file instead. Band/window parameters are
-    #     per-model config: for a second model, re-derive them from that
-    #     model's own curves (docs/pipeline_architecture.md).
+    # --- Stage-2 analysis. Input is the current single-turn sys_strict run:
+    #     attacks plus authorized requests, a random one-token secret per
+    #     request, the final 16 complete prompt positions, and all response
+    #     positions. Stage 2/3 use prompt positions only. Set this to None
+    #     to use the Stage-1 output file instead. The earlier fixed-secret file
+    #     "qwen35-4b-full-corpus-user-response-positions-top10-relabeled.jsonl"
+    #     still works as an input, but it predates user_type/authorized and
+    #     so cannot feed the lens+metadata feature set. Band/window
+    #     parameters are per-model config: for a second model, re-derive
+    #     them from that model's own curves (docs/pipeline_architecture.md).
     "analysis_input_file": ROOT / "outputs" / "j-lens-run" / (
         "qwen35-4b-random-single-token-seed20260812-attack-authorized-"
         "sys_strict-full-corpus-last-16-prompt-plus-response-positions-top10.jsonl"
@@ -152,29 +185,30 @@ SETTINGS = {
         "heatmap_layers": list(range(17, 32)),
     },
 
-    # --- M1: secret-rank-only baselines. Both variants use the same shared
-    #     outer category folds as M2; tuning, when enabled, stays inside
-    #     each outer training fold.
+    # --- M1: single-token (secret-rank) models. Every variant is fitted
+    #     once per feature set, on the same shared outer category folds as
+    #     M2; tuning, when enabled, stays inside each outer training fold.
     "run_m1": True,
     "m1": {
-        # Frozen Stage-2.1 feature bank (2 bands x 6 position aggregates).
-        # Measured on the dev split: the bank lifted sys_lax logreg AUC from
-        # 0.549 (4 features) to 0.648 -- selection happens inside the CV
-        # folds via regularization, not by editing this list.
-        "features": [
-            "late_ref_level",        # F1: last scaffolding token, late band
-            "late_scaffold_ref_mean",
-            "late_user_last",
-            "late_user_peak",        # F2
-            "late_user_mean",
-            "scaffold_delta",        # F3
-            "mid_scaffold_last",
-            "mid_scaffold_ref_mean",
-            "mid_user_last",
-            "mid_user_peak",         # F4
-            "mid_user_mean",
-            "mid_scaffold_delta",
-        ],
+        # Two feature sets, compared like-for-like:
+        #   "lens"      -- the frozen Stage-2.1 feature bank (2 bands x 6
+        #                  position aggregates). Measured on the dev split,
+        #                  the bank lifted sys_lax logreg AUC from 0.549
+        #                  (4 features) to 0.648 -- selection happens inside
+        #                  the CV folds via regularization, not by editing
+        #                  this list.
+        #   "lens_meta" -- the same bank plus request metadata that a
+        #                  deployment knows before the response exists.
+        #                  Caveat, read M1_single_token_model.py's
+        #                  docstring: `authorized` implies a non-leak by the
+        #                  target's own definition, so its lift on the "all"
+        #                  cohort is partly definitional. The
+        #                  "unauthorized" cohort row is the honest
+        #                  comparison.
+        "feature_sets": {
+            "lens": LENS_FEATURES,
+            "lens_meta": LENS_FEATURES + REQUEST_METADATA_FEATURES,
+        },
         "variants": ["m1_logreg", "m1_xgb"],
         "threshold": 0.5,
         "optimize_hyperparameters": True,
@@ -224,10 +258,12 @@ SETTINGS = {
     },
 
     # --- M3: no meta-learner. Average the configured M1 rank-only and M2
-    #     Top-k-only probabilities on their identical OOF rows.
+    #     Top-k-only probabilities on their identical OOF rows. m1_variant
+    #     names one "<variant>__<feature set>" M1 model; the lens-only one
+    #     keeps M3 a pure readout-vs-readout ensemble.
     "run_m3": True,
     "m3": {
-        "m1_variant": "m1_logreg",
+        "m1_variant": "m1_logreg__lens",
         "m2_feature_mode": "topk_only",
         "threshold": 0.5,
         "output_dir": CLASSIFIER_OUTPUT_DIR,
@@ -252,15 +288,50 @@ def read_jsonl(path):
         return [json.loads(line) for line in file if line.strip()]
 
 
-def _per_system_summary(label, per_system_df):
-    """Compact console view of a per-system metrics table."""
+def _per_cohort_summary(label, per_cohort_df):
+    """Compact console view of a per-cohort metrics table."""
     columns = [
-        "model", "system_id", "n_dev", "n_leaks",
+        "model", "cohort", "n_dev", "n_leaks",
         "mean_fold_auc", "fold_auc_std", "oof_auc", "oof_balanced_accuracy",
     ]
     return (
-        f"{label} per-system metrics:\n"
-        + per_system_df[columns].round(3).to_string(index=False)
+        f"{label} per-cohort metrics:\n"
+        + per_cohort_df[columns].round(3).to_string(index=False)
+    )
+
+
+def _audit(validation, label, predictions, probability_columns, target_col,
+           threshold, tables):
+    """Score one model inside the leakage-audit strata and collect the table.
+
+    Reported next to, never instead of, the headline cohort numbers: an
+    all-rows score on this corpus mixes "is this an attack", "is this the
+    first attempt" and "will this attack succeed" (see
+    validation.leakage_audit_subsets).
+    """
+    dev = predictions.loc[predictions["split"].eq("dev")]
+    table = validation.per_subset_metrics(
+        predictions, probability_columns, target_col,
+        validation.leakage_audit_subsets(dev), threshold,
+    )
+    table.to_csv(
+        CLASSIFIER_OUTPUT_DIR / f"{label}_leakage_audit_metrics.csv", index=False
+    )
+    print(_per_cohort_summary(f"{label} leakage audit", table))
+    tables.append(table)
+    return table
+
+
+def _authorization_cohort(predictions):
+    """Label each run by whether it was entitled to the secret.
+
+    Reporting dimension only, never a fold group: authorized runs cannot be
+    leaks by the target's definition, so a model that sees `authorized`
+    scores them for free. Splitting the report this way shows what each
+    feature set is worth where the metadata cannot decide the label.
+    """
+    return np.where(
+        predictions["authorized"].astype(bool), "authorized", "unauthorized"
     )
 
 
@@ -279,10 +350,10 @@ def main():
         # An integrated run always trains on the data it just generated.
         run_data_file = stage1_output
 
-    # --- Stage 2.1: single-token analysis -- two figures + the F1-F4
-    #     feature table (also written to CSV as the hand-off artifact).
-    #     Figures/CV inside are dev-only; the feature table covers all runs
-    #     and carries a "split" column.
+    # --- Stage 2.1: single-token analysis -- two figures + the feature
+    #     table (also written to CSV as the hand-off artifact). Restricted
+    #     to SETTINGS["system_ids"]; figures/CV inside are dev-only; the
+    #     feature table covers all runs and carries a "split" column.
     single_token_analysis = load_stage("2_EDA_and_FE/single_token_analysis.py")
     single_token_features = single_token_analysis.run(SETTINGS, run_data_file)
     print("Stage 2.1 complete:", single_token_features.shape[0], "runs,",
@@ -314,7 +385,8 @@ def main():
             .to_string()
         )
 
-        per_system_tables = []
+        per_cohort_tables = []
+        audit_tables = []
 
         m1_predictions = None
         if SETTINGS["run_m1"]:
@@ -322,19 +394,33 @@ def main():
             m1_metrics, m1_predictions, m1_models = m1.run(
                 SETTINGS, single_token_features, fold_plan, validation
             )
-            print(f"M1 complete: {len(m1_metrics)} variants, "
+            print(f"M1 complete: {len(m1_metrics)} models "
+                  f"({len(SETTINGS['m1']['variants'])} variants x "
+                  f"{len(SETTINGS['m1']['feature_sets'])} feature sets), "
                   f"{len(m1_predictions)} prediction rows")
-            m1_per_system = validation.per_system_metrics(
+            # The feature-set comparison is read per authorization cohort:
+            # on "all" runs the lens+metadata set can score the authorized
+            # rows off `authorized` alone, on "unauthorized" it cannot.
+            m1_predictions["authorization"] = _authorization_cohort(m1_predictions)
+            m1_probability_columns = [
+                f"{variant}__{feature_set}_probability"
+                for feature_set in SETTINGS["m1"]["feature_sets"]
+                for variant in SETTINGS["m1"]["variants"]
+            ]
+            m1_per_cohort = validation.per_cohort_metrics(
                 m1_predictions,
-                [f"{variant}_probability" for variant in SETTINGS["m1"]["variants"]],
+                m1_probability_columns,
                 target_col="attack_successful",
                 threshold=SETTINGS["m1"]["threshold"],
+                cohort_col="authorization",
             )
-            m1_per_system.to_csv(
-                CLASSIFIER_OUTPUT_DIR / "M1_per_system_metrics.csv", index=False
+            m1_per_cohort.to_csv(
+                CLASSIFIER_OUTPUT_DIR / "M1_per_cohort_metrics.csv", index=False
             )
-            print(_per_system_summary("M1", m1_per_system))
-            per_system_tables.append(m1_per_system)
+            print(_per_cohort_summary("M1", m1_per_cohort))
+            per_cohort_tables.append(m1_per_cohort)
+            _audit(validation, "M1", m1_predictions, m1_probability_columns,
+                   "attack_successful", SETTINGS["m1"]["threshold"], audit_tables)
 
         multitoken_model = load_stage("3_model_predictions/M2_top_k_token_model.py")
         m2_metrics, m2_predictions, m2_models = multitoken_model.run(
@@ -350,18 +436,22 @@ def main():
         # Per-system breakdown of the canonical (selected-position) columns;
         # topk_only is M2 in the architecture, topk_plus_rank is M4.
         mode_labels = {"topk_only": "M2", "topk_plus_rank": "M4"}
+        m2_predictions["authorization"] = _authorization_cohort(m2_predictions)
         for mode in multitoken_model.FEATURE_MODES[SETTINGS["multitoken"]["mode"]]:
             label = mode_labels[mode]
-            mode_per_system = validation.per_system_metrics(
+            mode_per_cohort = validation.per_cohort_metrics(
                 m2_predictions,
                 [f"m2_{mode}_probability"],
                 target_col="actual_leaked",
+                cohort_col="authorization",
             )
-            mode_per_system.to_csv(
-                CLASSIFIER_OUTPUT_DIR / f"{label}_per_system_metrics.csv", index=False
+            mode_per_cohort.to_csv(
+                CLASSIFIER_OUTPUT_DIR / f"{label}_per_cohort_metrics.csv", index=False
             )
-            print(_per_system_summary(f"{label} ({mode})", mode_per_system))
-            per_system_tables.append(mode_per_system)
+            print(_per_cohort_summary(f"{label} ({mode})", mode_per_cohort))
+            per_cohort_tables.append(mode_per_cohort)
+            _audit(validation, label, m2_predictions, [f"m2_{mode}_probability"],
+                   "actual_leaked", 0.5, audit_tables)
 
         # M3 runs last and consumes only predictions from the two base
         # models; it never sees their original features.
@@ -374,26 +464,49 @@ def main():
             )
             print("M3 complete:")
             print(m3_metrics.to_string(index=False))
-            m3_per_system = validation.per_system_metrics(
+            m3_predictions["authorization"] = _authorization_cohort(m3_predictions)
+            m3_per_cohort = validation.per_cohort_metrics(
                 m3_predictions,
                 ["m3_probability"],
                 target_col="actual_leaked",
                 threshold=SETTINGS["m3"]["threshold"],
+                cohort_col="authorization",
             )
-            m3_per_system.to_csv(
-                CLASSIFIER_OUTPUT_DIR / "M3_per_system_metrics.csv", index=False
+            m3_per_cohort.to_csv(
+                CLASSIFIER_OUTPUT_DIR / "M3_per_cohort_metrics.csv", index=False
             )
-            print(_per_system_summary("M3", m3_per_system))
-            per_system_tables.append(m3_per_system)
+            print(_per_cohort_summary("M3", m3_per_cohort))
+            per_cohort_tables.append(m3_per_cohort)
+            _audit(validation, "M3", m3_predictions, ["m3_probability"],
+                   "actual_leaked", SETTINGS["m3"]["threshold"], audit_tables)
 
-        # --- combined at-a-glance comparison table (all models, pooled +
-        #     per system), saved next to the Stage-2.1 figures.
-        if per_system_tables:
+        # --- two at-a-glance tables next to the Stage-2.1 figures: the
+        #     headline cohorts, and the leakage audit that shows how much of
+        #     each headline number survives once the corpus's structural
+        #     confounders are held fixed.
+        comparison_dir = SETTINGS["analysis_output_dir"] / SETTINGS["active_model"]
+        comparison_dir.mkdir(parents=True, exist_ok=True)
+        scope = ", ".join(SETTINGS["system_ids"]) if SETTINGS["system_ids"] else "all system prompts"
+        if per_cohort_tables:
             model_comparison_table = load_stage("3_model_predictions/model_comparison_table.py")
-            comparison_dir = SETTINGS["analysis_output_dir"] / SETTINGS["active_model"]
-            comparison_dir.mkdir(parents=True, exist_ok=True)
             model_comparison_table.save(
-                per_system_tables, comparison_dir / "model_comparison_per_system.png"
+                per_cohort_tables,
+                comparison_dir / "model_comparison_per_cohort.png",
+                title=f"Stage-3 model comparison -- {scope} (dev split, shared folds)",
+            )
+        if audit_tables:
+            model_comparison_table = load_stage("3_model_predictions/model_comparison_table.py")
+            model_comparison_table.save(
+                audit_tables,
+                comparison_dir / "model_comparison_leakage_audit.png",
+                title=f"Stage-3 leakage audit -- {scope} (dev split, shared folds)",
+                note=(
+                    "same OOF probabilities, re-scored inside nested strata: "
+                    "'all' mixes benign-vs-attack detection and attempt-1 detection\n"
+                    "into the leak score; 'attack_attempt_1' / "
+                    "'attack_attempt_2plus' hold both confounders fixed "
+                    "(see validation.leakage_audit_subsets)"
+                ),
             )
 
     # The final holdout remains untouched unless evaluate_holdout=True.

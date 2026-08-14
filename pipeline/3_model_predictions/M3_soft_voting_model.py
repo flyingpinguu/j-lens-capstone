@@ -69,8 +69,8 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
         m1_predictions,
         fold_plan,
         [
-            "category", "system_id", "attack_successful", "split", "fold",
-            m1_probability_column,
+            "category", "system_id", "authorized", "label", "attempt_index",
+            "attack_successful", "split", "fold", m1_probability_column,
         ],
         "M1",
     )
@@ -95,6 +95,10 @@ def run(settings, fold_plan, m1_predictions, m2_predictions):
 
     predictions = fold_plan.copy()
     predictions["system_id"] = m1["system_id"].to_numpy()
+    # carried for reporting cohorts/strata only -- M3 averages probabilities
+    # and never looks at metadata itself
+    for column in ("authorized", "label", "attempt_index"):
+        predictions[column] = m1[column].to_numpy()
     predictions["actual_leaked"] = m1["attack_successful"].to_numpy(dtype=bool)
     predictions["m1_probability"] = m1[m1_probability_column].to_numpy(dtype=float)
     dev = predictions["split"].eq("dev").to_numpy()

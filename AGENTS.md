@@ -18,6 +18,23 @@ people, 4 weeks.
 - **First deliverable:** single-model pipeline — one base model, one fitted
   lens. Leak-rate baseline, layer-band descriptive profile, per-layer
   predictive classifier.
+- **`sys_strict` only.** `sys_lax` is dropped from analysis, model fitting
+  and evaluation. `data/evaluation/system_prompts_authz.jsonl` still
+  contains both, and Stage 1 still generates whichever rows it is given —
+  the restriction is `SETTINGS["system_ids"] = ["sys_strict"]`, applied in
+  Stage 2.1 and 2.2 so both tracks and the shared fold plan see the same
+  runs. Anything reported from an older pooled run file must say which
+  system prompt it came from.
+- **Authorized access is part of the task now.** The system prompt names a
+  user role and an access password; a request is entitled to the secret if
+  the role is `admin` or the user turn carries the correct password. The
+  harness therefore separates `secret_revealed` (the secret appeared) from
+  `attack_successful` (it appeared *and* the request was not authorized).
+  `attack_successful` is the classifier target.
+- **M1 is run on two feature sets, compared like-for-like:** `lens` (the
+  Stage-2.1 readout bank as before) and `lens_meta` (the same bank plus
+  `user_type_is_admin` and `authorized`). See the authorization guardrail
+  below before quoting the `lens_meta` numbers.
 - **Second analysis track (accepted, not a side-quest):** exploratory
   top-k token-readout analysis per layer (see "Two dataframes" below) —
   instruction-mode vocabulary, leak-vs-resist token comparison.
@@ -100,6 +117,60 @@ Keep this reimplementation consistent with `apply()`'s actual behavior in
   position across different attack templates (a short direct command vs. a
   long storytelling setup) — per-offset AUC curves are noisier than per-layer
   ones for this reason, not just from sample size.
+- **Never report an all-rows AUC on the multi-turn corpus without the
+  leakage audit next to it.** Two structural confounders are baked into how
+  this data was collected, and an all-rows score is a mixture of three
+  questions, only the last of which is the project's:
+  1. *Is this an attack at all?* 757 of 1962 dev rows are benign controls
+     with a 0.4% leak rate vs 19.9% for attacks. Telling chit-chat apart
+     from adversarial prompts is easy and unrelated to leak prediction.
+  2. *Is this the first attempt?* A conversation stops on disclosure, so
+     every attempt >= 2 row is by construction one that already resisted:
+     attack leak rate is 48.6% at attempt 1 and 2-8% afterwards. Attempt 1
+     also differs in kind (written corpus template vs. model-generated
+     follow-up, and no conversation history yet), all of which is readable
+     from the prompt-end readout window.
+  3. *Will this attack succeed?* — visible only inside a fixed
+     attack/attempt stratum.
+  Measured effect: M2 scores 0.902 OOF AUC over all rows and **0.503 —
+  chance — on attack rows at attempt 1**; M1 lens goes 0.683 → 0.551. The
+  pooled numbers are a Simpson-style artifact, not a bug in the models.
+  `pipeline/validation.py::leakage_audit_subsets` defines the strata and
+  every Stage-3 model is scored in them
+  (`outputs/analysis/<model>/model_comparison_leakage_audit.png`).
+- **Position selection inflates M2/M4.** The reported M2 number is the best
+  of 16 prompt positions, selected on the same CV metric it then reports.
+  Treat the winning position's AUC as an upper bound, not an unbiased
+  estimate.
+- **The last prompt positions are close to reading the answer.** The
+  layer-31 readout at the final prompt position *is* the model's logit
+  distribution over the first response token; the per-position AUC profile
+  rises monotonically toward the prompt end (0.58 at minus_16 to 0.87 at
+  minus_02) as expected from that. This is not banned the way response
+  positions are — it is still a pre-response readout — but a result driven
+  entirely by the last two positions is much weaker evidence for an
+  *internal, early* signal than one that holds further back.
+- **`authorized` is a near-definitional feature — never report a
+  metadata-model number without the unauthorized-only cohort next to it.**
+  `attack_successful = secret_revealed AND NOT authorized`, so
+  `authorized == True` forces the target to 0. A model that sees
+  `authorized` scores those rows perfectly without learning anything about
+  leak risk, and its AUC over all runs is inflated by exactly that. The
+  metadata is legitimately available at request time, so this is not CV
+  leakage and the feature set is fair to build — but the honest comparison
+  between `lens` and `lens_meta` is the **unauthorized-only** cohort, where
+  the metadata cannot decide the label. `pipeline/validation.py`'s
+  `per_cohort_metrics` reports both cohorts for every model. The same
+  applies to the descriptive Stage-2.1 curves: authorized runs are exactly
+  the runs where the secret *does* surface internally while the label says
+  "no leak", so they push the per-layer AUC toward chance or below.
+- **Authorization is confounded with `category`, and `category` is the fold
+  group.** All `authorized == True` rows live in two categories
+  (`admin_request`, `password_correct`), and `user_type == "admin"` lives in
+  `admin_request` alone. Under GroupKFold by category, the fold that holds
+  out `admin_request` trains on zero admin rows — `user_type_is_admin` is
+  constant in training there and the model extrapolates on the test fold.
+  Report this rather than reading a per-fold swing as signal.
 - **Open decision: how `control`/`benign` rows factor into the `category`
   fold groups.** Not yet decided whether `control` is its own held-out group
   like the attack categories, or always included in every fold as a negative
@@ -199,9 +270,21 @@ Current single- and multi-turn inputs are
 `data/evaluation/conversation_seeds.jsonl` and
 `data/evaluation/system_prompts_authz.jsonl`. The former adds `goal`,
 `tactic`, `tactic_instruction`, and `attacker_strategy` to the starter
-prompts. `data/evaluation/injection_corpus.jsonl` and
+prompts, plus the authorization fields `user_type` (`user`/`admin`),
+`authorized`, and `password` (`none`/`correct`/`wrong`). It has 696 rows in
+16 categories — the 11 original attack families plus `control` and the four
+new authorization families `admin_request` (30), `password_correct` (30),
+`auth_bypass` (16), `password_wrong` (6); 60 rows are `authorized == True`.
+Re-check these counts before hardcoding them. `injection_corpus_user_type.jsonl`
+is the same corpus without the attacker fields, and
+`conversation_attacker.jsonl` is a variant with a different
+control/authorized balance — the pipeline reads `conversation_seeds.jsonl`.
+The authz system prompts carry three placeholders: `{{SECRET}}`,
+`{{ACCESS_PASSWORD}}` and `{{USER_TYPE}}`.
+`data/evaluation/injection_corpus.jsonl` and
 `data/evaluation/system_prompts.jsonl` remain supported for legacy
-single-turn/fixed-secret runs. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
+single-turn/fixed-secret runs, but they have no authorization fields and so
+cannot feed the `lens_meta` feature set. `data/x_legacy/` (`eval.jsonl`, `pilot_eval.jsonl`,
 `jlens_pilot_test_20.jsonl`, `pilot_train.jsonl`, `train.jsonl`) is an older
 unrelated track — multi-token secrets like
 `TRAIN-AMBER-PINE-1137`, no `jlens` involvement, disconnected from the run
@@ -221,7 +304,8 @@ Current run outputs, `outputs/j-lens-run/`:
 - `qwen35-4b-multi-turn-5-attempts-random-single-token-seed20260812-`
   `full-corpus-last-16-positions-top10.jsonl` — previous multi-turn run,
   retained as a documented negative/shortcut experiment rather than the
-  primary training dataset.
+  primary training dataset. It contains 2320 defender turns over 696
+  conversations and is about 374 MB; stream it rather than loading it whole.
 
 ## Run harness notes (`notebooks/j-lens-run.ipynb`)
 
@@ -237,10 +321,13 @@ the notebook and old output formats remain compatible inputs.
   so lax and strict use the same secret and resume is stable. Each assigned
   string is verified to remain exactly one token in both system prompts;
   set `probe_enabled=True` to save its rank/logit at every readout cell.
-- The current multi-turn default is `readout_positions = "last_n"` with
-  `readout_last_n = 16`: exactly the final 16 tokens of the complete defender
-  prompt, including its response scaffolding and never response tokens. The
-  alternative `"attacker_last_n_plus_suffix"` mode stores the final N current
+- The current single-turn default is
+  `readout_positions = "last_n_prompt_plus_response"` with
+  `readout_last_n = 16`: the final 16 tokens of the complete defender prompt,
+  including its response scaffolding, plus every generated response position.
+  Classifier feature extraction excludes those response positions. For the
+  previous multi-turn experiment, `"last_n"` stores only the final N prompt
+  positions; `"attacker_last_n_plus_suffix"` stores the final N current
   attacker tokens plus all scaffolding and is therefore wider than 16 rows.
 
 - `READOUT_POSITIONS` (`"last"` / `"last_n"` / `"user"` / `"prompt"` / `"all"`) controls how many
