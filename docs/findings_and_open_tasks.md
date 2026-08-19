@@ -27,6 +27,31 @@ M4 is effectively tied with M2 here, so adding secret-rank features does not
 provide a material lift. M1's metadata lift on all rows mostly disappears in
 the unauthorized cohort and varies strongly by held-out category.
 
+## Qwen3-14B attack-only comparison
+
+The Qwen3-14B Colab run uses the same strict single-turn prompts and unique
+one-token secrets. Its 60 authorized requests are present in the source
+JSONL but excluded before feature extraction, fold construction, training
+and evaluation. This leaves 478 attacks; the unchanged final category
+holdout contains 126 rows, while development CV uses 352 rows with 49 leaks.
+
+| model | mean fold AUC ± std | OOF AUC | OOF balanced accuracy |
+|---|---:|---:|---:|
+| M1 logreg, lens features | 0.723 ± 0.158 | 0.672 | 0.660 |
+| M1 XGBoost, lens features | 0.719 ± 0.136 | 0.661 | 0.656 |
+| M2, top-k only | **0.835 ± 0.081** | **0.843** | 0.753 |
+| M3, soft vote | 0.823 ± 0.106 | 0.830 | **0.775** |
+| M4, top-k + secret rank | 0.830 ± 0.091 | 0.828 | 0.760 |
+
+Only four of five GroupKFold folds have a defined AUC: the fold containing
+`indirect_injection` alone has no positive examples. M2/M4 select the best
+of 16 positions on the same CV scores they report, and both select the final
+prompt/scaffolding position; treat those AUCs as optimistic development
+estimates. The final 126-row category holdout remains unevaluated. The 14B
+pipeline uses layers 20–39 (the architecture-proportional second half) and
+late/mid rank bands 34–39 and 20–33. Cross-model differences remain
+confounded by the separately fitted lenses.
+
 ## Previous multi-turn shortcut audit (not the primary dataset)
 
 The following results are retained because they motivated the return to the

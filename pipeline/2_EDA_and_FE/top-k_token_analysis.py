@@ -38,13 +38,16 @@ def _prompt_positions(row):
 def run(settings, input_file):
     """Stream a run JSONL into run × position × layer × Top-k arrays.
 
-    ``settings["system_ids"]`` (None = every system prompt) is applied with
-    the same rule as Stage 2.1, so both tracks -- and therefore the shared
-    fold plan -- cover exactly the same runs.
+    ``settings["system_ids"]`` (None = every system prompt) and optional
+    ``settings["analysis_include_labels"]`` are applied with the same rule
+    as Stage 2.1, so both tracks -- and therefore the shared fold plan --
+    cover exactly the same runs.
     """
     cfg = settings["multitoken"]
     system_ids = settings.get("system_ids")
     system_ids = set(system_ids) if system_ids is not None else None
+    include_labels = settings.get("analysis_include_labels")
+    include_labels = set(include_labels) if include_labels is not None else None
     layers = tuple(cfg["layers"])
     top_k = cfg["top_k"]
     n_positions = cfg["n_prompt_positions"]
@@ -53,9 +56,10 @@ def run(settings, input_file):
         for offset in range(n_positions, 0, -1)
     )
 
-    metadata_rows, all_ids, all_logits, skipped = [], [], [], []
+    metadata_rows, all_ids, all_logits, all_probe_ranks, skipped = [], [], [], [], []
     token_text = {}
     n_skipped_system = 0
+    n_skipped_label = 0
 
     with input_file.open(encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
@@ -70,18 +74,22 @@ def run(settings, input_file):
             if system_ids is not None and row["system_id"] not in system_ids:
                 n_skipped_system += 1
                 continue
+            if include_labels is not None and row["label"] not in include_labels:
+                n_skipped_label += 1
+                continue
 
             prompt_positions = _prompt_positions(row)
             if len(prompt_positions) < n_positions:
                 skipped.append(row["id"])
                 continue
 
-            run_ids, run_logits = [], []
+            run_ids, run_logits, run_probe_ranks = [], [], []
             for offset in range(n_positions, 0, -1):
                 readout = row["readouts"][str(prompt_positions[-offset])]
-                position_ids, position_logits = [], []
+                position_ids, position_logits, position_probe_ranks = [], [], []
                 for layer in layers:
-                    top = readout["layers"][str(layer)]["top_k"]
+                    layer_readout = readout["layers"][str(layer)]
+                    top = layer_readout["top_k"]
                     ids = [int(value) for value in top["token_ids"][:top_k]]
                     logits = [float(value) for value in top["logits"][:top_k]]
                     if len(ids) != top_k or len(logits) != top_k:
@@ -90,9 +98,14 @@ def run(settings, input_file):
                         )
                     position_ids.append(ids)
                     position_logits.append(logits)
+                    probe = layer_readout.get("probe")
+                    position_probe_ranks.append(
+                        float(probe["rank"]) if probe is not None else np.nan
+                    )
                     token_text.update(zip(ids, top["tokens"][:top_k]))
                 run_ids.append(position_ids)
                 run_logits.append(position_logits)
+                run_probe_ranks.append(position_probe_ranks)
 
             metadata_rows.append({
                 "run_id": row["id"],
@@ -107,21 +120,34 @@ def run(settings, input_file):
             })
             all_ids.append(run_ids)
             all_logits.append(run_logits)
+            all_probe_ranks.append(run_probe_ranks)
 
     token_ids = np.asarray(all_ids, dtype=np.int32)
     logits = np.asarray(all_logits, dtype=np.float32)
+    probe_ranks = np.asarray(all_probe_ranks, dtype=np.float32)
     expected = (len(metadata_rows), n_positions, len(layers), top_k)
     if token_ids.shape != expected or logits.shape != expected:
         raise ValueError(f"Unexpected Top-k array shape: {token_ids.shape}, expected {expected}")
+    expected_ranks = expected[:3]
+    if probe_ranks.shape != expected_ranks:
+        raise ValueError(
+            f"Unexpected probe-rank array shape: {probe_ranks.shape}, expected {expected_ranks}"
+        )
 
     print(f"Stage 2.2: {len(metadata_rows):,} runs, shape {token_ids.shape}; "
           f"skipped {len(skipped)} runs shorter than {n_positions} positions"
           + (f", {n_skipped_system} runs outside system_ids={sorted(system_ids)}"
              if system_ids is not None else ""))
+    if include_labels is not None:
+        print(
+            f"Stage 2.2: skipped {n_skipped_label} runs outside "
+            f"analysis_include_labels={sorted(include_labels)}"
+        )
     return {
         "metadata": pd.DataFrame(metadata_rows),
         "token_ids": token_ids,
         "logits": logits,
+        "probe_ranks": probe_ranks,
         "position_names": position_names,
         "layers": layers,
         "top_k": top_k,

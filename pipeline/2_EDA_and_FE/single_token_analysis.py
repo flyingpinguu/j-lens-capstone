@@ -12,7 +12,9 @@ loaded into memory at once), then:
      Stage 3 and written to CSV as the track's hand-off artifact.
 
 Scope: settings["system_ids"] restricts every output here to the listed
-system prompts. The project now analyses `sys_strict` only, so the two
+system prompts; settings["analysis_include_labels"] optionally restricts
+the row labels before any features or folds are built. The project now
+analyses `sys_strict` only, so the two
 curves/panels that used to contrast sys_lax with sys_strict contrast the
 two *authorization cohorts* instead (see cohort_frames below) -- with
 admin/password rows in the corpus, "all runs" and "unauthorized runs only"
@@ -32,8 +34,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GroupKFold, cross_val_score
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
@@ -60,7 +64,11 @@ def cohort_frames(df):
     "unauthorized" is the same analysis restricted to runs where the
     protection was actually supposed to hold.
     """
-    return [("all", df), ("unauthorized", df[~df["authorized"].astype(bool)])]
+    frames = [("all", df)]
+    unauthorized = df[~df["authorized"].astype(bool)]
+    if len(unauthorized) != len(df):
+        frames.append(("unauthorized", unauthorized))
+    return frames
 
 
 def positions_by_segment(readouts):
@@ -80,7 +88,7 @@ def band_log_rank(layers_data, band):
     return float(np.mean([np.log(layers_data[str(layer)]["probe"]["rank"]) for layer in band]))
 
 
-def collect(input_file, analysis_cfg, system_ids=None):
+def collect(input_file, analysis_cfg, system_ids=None, include_labels=None):
     """Single streaming pass -> everything the three outputs below need.
 
     ``system_ids`` (None = keep every system prompt) is applied here, so the
@@ -100,6 +108,7 @@ def collect(input_file, analysis_cfg, system_ids=None):
     feature_rows = []        # F1-F4
     n_skipped_short = 0
     n_skipped_system = 0
+    n_skipped_label = 0
 
     with input_file.open(encoding="utf-8") as file:
         for line_no, line in enumerate(file, start=1):
@@ -113,6 +122,9 @@ def collect(input_file, analysis_cfg, system_ids=None):
 
             if system_ids is not None and row["system_id"] not in system_ids:
                 n_skipped_system += 1
+                continue
+            if include_labels is not None and row["label"] not in include_labels:
+                n_skipped_label += 1
                 continue
 
             if n_layers is None:
@@ -201,6 +213,8 @@ def collect(input_file, analysis_cfg, system_ids=None):
           f"(heatmap skips {n_skipped_short} runs with < {user_window_n} user positions"
           + (f"; {n_skipped_system} runs skipped by system_ids={sorted(system_ids)}"
              if system_ids is not None else "")
+          + (f"; {n_skipped_label} runs skipped by analysis_include_labels="
+             f"{sorted(include_labels)}" if include_labels is not None else "")
           + ")")
     return {
         "n_layers": n_layers,
@@ -211,10 +225,24 @@ def collect(input_file, analysis_cfg, system_ids=None):
 
 
 def cv_auc(X, y, groups, pipeline_):
-    scores = cross_val_score(
-        pipeline_, X, y, cv=GroupKFold(5), groups=groups, scoring="roc_auc"
-    )
-    return scores.mean(), scores.std()
+    """GroupKFold AUC, omitting validation folds that contain one class.
+
+    A category with no leaks can occupy a fold by itself. AUC is undefined
+    there; treating it as zero or 0.5 would invent information, while
+    sklearn's default produces a warning for every layer/position cell.
+    """
+    scores = []
+    splitter = GroupKFold(5)
+    for train_idx, test_idx in splitter.split(X, y, groups):
+        y_test = y.iloc[test_idx]
+        if y_test.nunique() < 2:
+            continue
+        model = clone(pipeline_)
+        model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        scores.append(roc_auc_score(y_test, model.predict_proba(X.iloc[test_idx])[:, 1]))
+    if not scores:
+        return float("nan"), float("nan")
+    return float(np.mean(scores)), float(np.std(scores))
 
 
 def plot_per_layer_curve(curve_df, n_layers, scaffold_ref_n, scope_label, out_path):
@@ -349,16 +377,24 @@ def run(settings, input_file):
     holdout = set(settings["validation"]["holdout_categories"])
     system_ids = settings.get("system_ids")
     system_ids = set(system_ids) if system_ids is not None else None
+    include_labels = settings.get("analysis_include_labels")
+    include_labels = set(include_labels) if include_labels is not None else None
     scope_label = (
         " + ".join(sorted(system_ids)) if system_ids is not None else "all system prompts"
     )
+    if include_labels is not None:
+        scope_label += " | labels: " + ", ".join(sorted(include_labels))
     out_dir = settings["analysis_output_dir"] / settings["active_model"]
     out_dir.mkdir(parents=True, exist_ok=True)
     print("Reading:", input_file)
 
-    data = collect(input_file, analysis_cfg, system_ids)
+    data = collect(input_file, analysis_cfg, system_ids, include_labels)
     if data["features_df"].empty:
-        raise ValueError(f"No runs left after filtering to system_ids={sorted(system_ids)}")
+        raise ValueError(
+            "No runs left after analysis filters: "
+            f"system_ids={sorted(system_ids) if system_ids is not None else None}, "
+            f"labels={sorted(include_labels) if include_labels is not None else None}"
+        )
 
     curve_dev = data["curve_df"][~data["curve_df"]["category"].isin(holdout)]
     offset_dev = {
