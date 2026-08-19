@@ -1,0 +1,2 @@
+model,cohort,n_dev,n_leaks,n_auc_folds,mean_fold_auc,fold_auc_std,oof_auc,oof_accuracy,oof_balanced_accuracy
+m2_topk_only,all,352,171,5,0.6290411338383919,0.13823040751768956,0.6147135795289328,0.5653409090909091,0.5670091434848632

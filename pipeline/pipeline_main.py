@@ -27,6 +27,20 @@ SYSTEM_PROMPTS_FILE = ROOT / "data" / "evaluation" / "system_prompts_authz.jsonl
 
 # ------------------------------------------------------------- settings
 MODEL_CONFIGS = {
+    "qwen3-14b": {
+        "model_id": "Qwen/Qwen3-14B",
+        "dtype": "bfloat16",
+        "chat_kwargs": {"enable_thinking": False},
+        "lens_repo": "neuronpedia/jacobian-lens",
+        "lens_file": (
+            "qwen3-14b/jlens/Salesforce-wikitext/"
+            "Qwen3-14B_jacobian_lens.pt"
+        ),
+        # The published Qwen3 lens currently lives on the repository's main
+        # revision. Record the resolved Hub SHA in benchmark reports/runs if
+        # an immutable artifact reference is needed later.
+        "lens_revision": "main",
+    },
     "qwen35-4b": {
         "model_id": "Qwen/Qwen3.5-4B",
         "dtype": "bfloat16",
@@ -110,6 +124,13 @@ SETTINGS = {
     #     is unaffected -- it still generates whatever is in
     #     SYSTEM_PROMPTS_FILE.
     "system_ids": ["sys_strict"],
+    # Optional Stage-2/3 row filter. None preserves all labels in an input
+    # file; model-specific runners can set ["attack"] to remove authorized
+    # requests before feature extraction, folds, training and evaluation.
+    "analysis_include_labels": None,
+    # The multi-turn leakage audit is useful only when the row universe mixes
+    # controls and/or attempts. Attack-only single-turn runners disable it.
+    "run_leakage_audit": True,
 
     # --- collection. Keep "single_turn" for the existing corpus flow; use
     #     "multi_turn" for an adaptive attacker/defender conversation.
@@ -419,8 +440,9 @@ def main():
             )
             print(_per_cohort_summary("M1", m1_per_cohort))
             per_cohort_tables.append(m1_per_cohort)
-            _audit(validation, "M1", m1_predictions, m1_probability_columns,
-                   "attack_successful", SETTINGS["m1"]["threshold"], audit_tables)
+            if SETTINGS.get("run_leakage_audit", True):
+                _audit(validation, "M1", m1_predictions, m1_probability_columns,
+                       "attack_successful", SETTINGS["m1"]["threshold"], audit_tables)
 
         multitoken_model = load_stage("3_model_predictions/M2_top_k_token_model.py")
         m2_metrics, m2_predictions, m2_models = multitoken_model.run(
@@ -433,6 +455,23 @@ def main():
         )
         print(f"M2 complete: {len(m2_metrics)} metric rows, "
               f"{len(m2_predictions)} prediction rows, {len(m2_models)} final models")
+
+        # Honest token-position curves: every model uses only the readout at
+        # the named position. M3 combines the matching M1/M2 scores and M4 is
+        # refit with that position's Top-k/SVD plus rank feature.
+        position_auc_plot = load_stage(
+            "3_model_predictions/position_auc_plot.py"
+        )
+        position_auc_plot.run(
+            SETTINGS,
+            topk_dataset,
+            fold_plan,
+            m2_metrics,
+            m2_predictions,
+            topk_features,
+            multitoken_model,
+            validation,
+        )
         # Per-system breakdown of the canonical (selected-position) columns;
         # topk_only is M2 in the architecture, topk_plus_rank is M4.
         mode_labels = {"topk_only": "M2", "topk_plus_rank": "M4"}
@@ -450,8 +489,9 @@ def main():
             )
             print(_per_cohort_summary(f"{label} ({mode})", mode_per_cohort))
             per_cohort_tables.append(mode_per_cohort)
-            _audit(validation, label, m2_predictions, [f"m2_{mode}_probability"],
-                   "actual_leaked", 0.5, audit_tables)
+            if SETTINGS.get("run_leakage_audit", True):
+                _audit(validation, label, m2_predictions, [f"m2_{mode}_probability"],
+                       "actual_leaked", 0.5, audit_tables)
 
         # M3 runs last and consumes only predictions from the two base
         # models; it never sees their original features.
@@ -477,8 +517,9 @@ def main():
             )
             print(_per_cohort_summary("M3", m3_per_cohort))
             per_cohort_tables.append(m3_per_cohort)
-            _audit(validation, "M3", m3_predictions, ["m3_probability"],
-                   "actual_leaked", SETTINGS["m3"]["threshold"], audit_tables)
+            if SETTINGS.get("run_leakage_audit", True):
+                _audit(validation, "M3", m3_predictions, ["m3_probability"],
+                       "actual_leaked", SETTINGS["m3"]["threshold"], audit_tables)
 
         # --- two at-a-glance tables next to the Stage-2.1 figures: the
         #     headline cohorts, and the leakage audit that shows how much of
@@ -489,10 +530,17 @@ def main():
         scope = ", ".join(SETTINGS["system_ids"]) if SETTINGS["system_ids"] else "all system prompts"
         if per_cohort_tables:
             model_comparison_table = load_stage("3_model_predictions/model_comparison_table.py")
+            include_labels = SETTINGS.get("analysis_include_labels")
+            comparison_note = (
+                "(authorized requests excluded before features, folds, training and evaluation)"
+                if include_labels == ["attack"]
+                else model_comparison_table.DEFAULT_NOTE
+            )
             model_comparison_table.save(
                 per_cohort_tables,
                 comparison_dir / "model_comparison_per_cohort.png",
                 title=f"Stage-3 model comparison -- {scope} (dev split, shared folds)",
+                note=comparison_note,
             )
         if audit_tables:
             model_comparison_table = load_stage("3_model_predictions/model_comparison_table.py")

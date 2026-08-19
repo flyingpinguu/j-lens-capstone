@@ -291,6 +291,12 @@ unrelated track — multi-token secrets like
 harness. Do not wire those files into the jlens pipeline.
 
 Current run outputs, `outputs/j-lens-run/`:
+- `qwen3-14b-random-single-token-seed20260812-attack-authorized-sys_strict-`
+  `full-corpus-last-16-prompt-plus-response-positions-top10.jsonl` — Qwen3-14B
+  Colab run with 538 rows and all 40 layers. The matching attack-only analysis
+  uses `pipeline/qwen3_14b_analysis.py`, which removes the 60 authorized rows
+  before feature extraction and shared fold construction, then uses layers
+  20–39 for M2/M4 and model-relative M1 bands 20–33 / 34–39.
 - `qwen35-4b-random-single-token-seed20260812-attack-authorized-sys_strict-`
   `full-corpus-last-16-prompt-plus-response-positions-top10.jsonl` — current
   primary run: 478 attacks plus 60 authorized requests, one response each,

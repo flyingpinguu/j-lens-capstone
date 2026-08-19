@@ -18,8 +18,10 @@ import base64
 import codecs
 import hashlib
 import json
+import os
 import random
 import re
+import time
 from functools import lru_cache
 
 import torch
@@ -418,7 +420,24 @@ def run(settings, injections, system_prompts):
     readout_positions_mode = settings["readout_positions"]
     device = pick_device()
     dtype = resolve_dtype(model_config["dtype"], device)
+    benchmark_timing = bool(settings.get("benchmark_timing", False))
     print("Device:", device, "| dtype:", dtype)
+
+    def sync_device():
+        if device == "cuda":
+            torch.cuda.synchronize()
+
+    def reset_peak_memory():
+        if device == "cuda" and benchmark_timing:
+            torch.cuda.reset_peak_memory_stats()
+
+    def peak_memory_gib():
+        if device != "cuda" or not benchmark_timing:
+            return None
+        return {
+            "allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+            "reserved_gib": torch.cuda.max_memory_reserved() / 2**30,
+        }
 
     # --- load tokenizer, model, lens (notebook: "Load model and existing lens")
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_config["model_id"])
@@ -646,12 +665,18 @@ def run(settings, injections, system_prompts):
 
         inputs = inputs.to(device)
         prompt_length = inputs.input_ids.shape[1]
+        reset_peak_memory()
+        sync_device()
+        generation_started = time.perf_counter()
         generated_ids = hf_model.generate(
             **inputs,
             max_new_tokens=settings["max_new_tokens"],
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
+        sync_device()
+        generation_seconds = time.perf_counter() - generation_started
+        generation_memory = peak_memory_gib()
         response_ids = generated_ids[0, prompt_length:]
         response = tokenizer.decode(response_ids, skip_special_tokens=True).strip()
         # Detect the secret in the response (plaintext + common evasions), then
@@ -694,6 +719,20 @@ def run(settings, injections, system_prompts):
             else inputs.input_ids
         )
 
+        reset_peak_memory()
+        sync_device()
+        readout_started = time.perf_counter()
+        readouts = get_readouts(
+            readout_input_ids,
+            prompt_length,
+            user_positions,
+            prompt_suffix_positions,
+            row["secret_token_id"],
+        )
+        sync_device()
+        readout_seconds = time.perf_counter() - readout_started
+        readout_memory = peak_memory_gib()
+
         result = {
             "id": run_id,
             "conversation_id": conversation_id,
@@ -733,14 +772,26 @@ def run(settings, injections, system_prompts):
             "user_start_position": min(user_positions),
             "prompt_suffix_start_position": min(prompt_suffix_positions),
             "response_start_position": prompt_length,
-            "readouts": get_readouts(
-                readout_input_ids,
-                prompt_length,
-                user_positions,
-                prompt_suffix_positions,
-                row["secret_token_id"],
-            ),
+            "readouts": readouts,
         }
+        if benchmark_timing:
+            response_token_count = int(response_ids.numel())
+            result["benchmark"] = {
+                "generation_seconds": generation_seconds,
+                "generation_tokens": response_token_count,
+                "generation_tokens_per_second": (
+                    response_token_count / generation_seconds
+                    if generation_seconds > 0
+                    else None
+                ),
+                "readout_seconds": readout_seconds,
+                "readout_positions": len(readouts),
+                "seconds_per_readout_position": (
+                    readout_seconds / len(readouts) if readouts else None
+                ),
+                "generation_peak_gpu_memory": generation_memory,
+                "readout_peak_gpu_memory": readout_memory,
+            }
         for key in (
             "tactic",
             "tactic_instruction",
@@ -787,6 +838,11 @@ def run(settings, injections, system_prompts):
             json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n"
         )
         output.flush()
+        if settings.get("fsync_output", False):
+            # For persistent Colab/Drive runs, do not acknowledge a row until
+            # the backing filesystem has accepted it. If Drive disconnects,
+            # fail immediately; rerunning resumes from the last durable row.
+            os.fsync(output.fileno())
         print("Done:", result["id"], "|", result["stop_reason"] or "continue")
 
     with output_file.open("a", encoding="utf-8") as output:
