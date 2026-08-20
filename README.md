@@ -51,7 +51,7 @@ flowchart LR
     G --> H["M1–M4<br/>leak risk scores"]
 ```
 
-The primary experiment uses **Qwen3-14B**, one strict system policy, and the final 16 prompt tokens across layers 20–39. To prevent near-duplicate attack templates from leaking across the split, entire attack families stay together during cross-validation. Response tokens are never used as predictive features.
+The primary experiment uses **Qwen3-14B**, one strict system policy, and the final 16 prompt tokens across layers 20–39. Across the corpus, the raw J-Lens output contains hundreds of thousands of token readouts, which our feature-engineering pipeline turns into compact model inputs through vocabulary selection and SVD. To prevent near-duplicate attack templates from leaking across the split, entire attack families stay together during cross-validation. Response tokens are never used as predictive features.
 
 ## What we found
 
@@ -138,13 +138,15 @@ More detail is available in [the pipeline architecture](docs/pipeline_architectu
 
 </details>
 
-## Built with
-
-Python · PyTorch · Hugging Face Transformers · PEFT/LoRA · Jacobian Lens · scikit-learn · XGBoost · Jupyter · Google Colab · Git LFS
-
 ## Acknowledgements
 
 This project builds on Anthropic's [Jacobian Lens](https://github.com/anthropics/jacobian-lens) and the companion work [*Verbalizable Representations Form a Global Workspace in Language Models*](https://transformer-circuits.pub/2026/workspace/index.html), using [Qwen3-14B](https://huggingface.co/Qwen/Qwen3-14B) and [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B).
+
+## Technology stack
+
+<p align="center">
+  <img src="assets/slides/technology-stack.png" alt="Technology stack: Qwen, Jacobian Lens, Hugging Face, PyTorch, PEFT, LoRA, Google Colab, scikit-learn and SVD" width="100%">
+</p>
 
 ---
 
